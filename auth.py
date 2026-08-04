@@ -47,7 +47,8 @@ def require_auth(f):
 def require_admin(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if g.user.get("fin_role") != "fin_admin":
+        user = getattr(g, "user", {})
+        if user.get("fin_role") != "fin_admin":
             return jsonify({"error": "Apenas administradores podem executar esta ação"}), 403
         return f(*args, **kwargs)
     return decorated
