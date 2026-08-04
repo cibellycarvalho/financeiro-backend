@@ -72,7 +72,11 @@ def atualizar_pedido(fornecedor_id, pedido_id):
             return jsonify({"error": "status inválido"}), 400
         campos.append("status = %s"); params.append(data["status"])
     if "valor_pago" in data:
-        campos.append("valor_pago = %s"); params.append(float(data["valor_pago"]))
+        try:
+            valor_pago = float(data["valor_pago"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "valor_pago inválido"}), 400
+        campos.append("valor_pago = %s"); params.append(valor_pago)
     if "data_pagamento" in data:
         campos.append("data_pagamento = %s"); params.append(data["data_pagamento"])
     if "observacao" in data:
