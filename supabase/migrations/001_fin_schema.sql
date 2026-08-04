@@ -139,10 +139,22 @@ CREATE POLICY "fin_select" ON fin_fornecedores FOR SELECT
 CREATE POLICY "fin_select" ON fin_pedidos_fornecedor FOR SELECT
   USING (auth.uid() IN (SELECT user_id FROM fin_user_roles));
 
+-- SELECT: cada usuário vê apenas sua própria role (evita recursão nas policies de outras tabelas)
+CREATE POLICY "fin_select" ON fin_user_roles FOR SELECT
+  USING (auth.uid() = user_id);
+
 -- ALL (INSERT/UPDATE/DELETE): apenas fin_admin
 CREATE POLICY "fin_write" ON fin_contas_pagar FOR ALL
   USING (auth.uid() IN (SELECT user_id FROM fin_user_roles WHERE role = 'fin_admin'));
 CREATE POLICY "fin_write" ON fin_repasses_ml FOR ALL
   USING (auth.uid() IN (SELECT user_id FROM fin_user_roles WHERE role = 'fin_admin'));
 CREATE POLICY "fin_write" ON fin_pedidos_fornecedor FOR ALL
+  USING (auth.uid() IN (SELECT user_id FROM fin_user_roles WHERE role = 'fin_admin'));
+CREATE POLICY "fin_write" ON fin_fornecedores FOR ALL
+  USING (auth.uid() IN (SELECT user_id FROM fin_user_roles WHERE role = 'fin_admin'));
+
+-- fin_pluggy_connections: SELECT para qualquer usuário fin_, write apenas fin_admin
+CREATE POLICY "fin_select" ON fin_pluggy_connections FOR SELECT
+  USING (auth.uid() IN (SELECT user_id FROM fin_user_roles));
+CREATE POLICY "fin_write" ON fin_pluggy_connections FOR ALL
   USING (auth.uid() IN (SELECT user_id FROM fin_user_roles WHERE role = 'fin_admin'));
