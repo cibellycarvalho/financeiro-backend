@@ -34,6 +34,12 @@ def dashboard():
     )
     total_pago = sum(c["valor"] for c in contas_pagas)
 
+    contas_pendentes_mes = db.query(
+        "SELECT valor FROM fin_contas_pagar WHERE status IN ('pendente', 'vencido') AND TO_CHAR(vencimento, 'YYYY-MM') = %s",
+        (mes_atual,)
+    )
+    total_pendente = sum(c["valor"] for c in contas_pendentes_mes)
+
     fornecedores_aberto = db.query("""
         SELECT f.nome, COALESCE(SUM(p.valor_total - p.valor_pago), 0) AS saldo_aberto
         FROM fin_fornecedores f
@@ -42,6 +48,7 @@ def dashboard():
         HAVING SUM(p.valor_total - p.valor_pago) > 0
         ORDER BY saldo_aberto DESC
     """)
+    total_fornecedores = sum(f["saldo_aberto"] for f in fornecedores_aberto)
 
     return jsonify({
         "contas_semana": contas_semana,
@@ -49,8 +56,8 @@ def dashboard():
             "a_pagar_semana": sum(c["valor"] for c in contas_semana),
             "repasses_bruto_mes": repasses_bruto,
             "cobranças_ml_mes": cobranças,
-            "saldo_disponivel": repasses_bruto - cobranças - total_pago,
-            "fornecedores_aberto": sum(f["saldo_aberto"] for f in fornecedores_aberto),
+            "saldo_disponivel": repasses_bruto - cobranças - total_pago - total_pendente - total_fornecedores,
+            "fornecedores_aberto": total_fornecedores,
         },
         "alertas": {
             "repasse_divergencia": False,
