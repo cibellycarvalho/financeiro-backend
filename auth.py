@@ -1,22 +1,25 @@
+import sys
+import traceback
 import jwt
+from jwt import PyJWKClient
 from functools import wraps
 from flask import request, g, jsonify
+import config
 import db
 
-# Chave pública EC do Supabase (ES256)
-_PUBLIC_KEY = {
-    "kty": "EC", "crv": "P-256",
-    "kid": "79884884-90d1-43e7-a2e2-205c8eb32575",
-    "x": "gJMVLZQ0J2Y6McnRxUzKE-izT6-PDMkU_K_SH-Mke8I",
-    "y": "EJEk6L63Eqfe6FgHjPpgaULIZ-VY7pY58QmjgXTGzfE",
-}
-_ec_key = jwt.algorithms.ECAlgorithm.from_jwk(_PUBLIC_KEY)
+_jwks_client = PyJWKClient(
+    f"{config.SUPABASE_URL}/auth/v1/.well-known/jwks.json",
+    cache_lifespan=3600,
+)
+
 
 def verify_jwt(token: str) -> dict:
+    signing_key = _jwks_client.get_signing_key_from_jwt(token)
     payload = jwt.decode(
-        token, _ec_key,
+        token,
+        signing_key.key,
         algorithms=["ES256"],
-        options={"verify_aud": False}
+        options={"verify_aud": False},
     )
     user_id = payload["sub"]
     email = payload.get("email", "")
@@ -25,6 +28,7 @@ def verify_jwt(token: str) -> dict:
     )
     fin_role = rows[0]["role"] if rows else None
     return {"user_id": user_id, "email": email, "fin_role": fin_role}
+
 
 def require_auth(f):
     @wraps(f)
@@ -37,12 +41,15 @@ def require_auth(f):
             g.user = verify_jwt(token)
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "Token expirado"}), 401
-        except Exception:
+        except Exception as e:
+            print(f"[auth] ERRO ao verificar token: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            traceback.print_exc(file=sys.stderr)
             return jsonify({"error": "Token inválido"}), 401
         if g.user["fin_role"] is None:
             return jsonify({"error": "Acesso não autorizado ao painel financeiro"}), 403
         return f(*args, **kwargs)
     return decorated
+
 
 def require_admin(f):
     @wraps(f)
