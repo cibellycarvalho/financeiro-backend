@@ -1,6 +1,9 @@
 from flask import Blueprint, request, jsonify, g
 from datetime import date
+import calendar
+import requests as http_req
 import db
+import config
 from auth import require_auth, require_admin
 
 bp = Blueprint("repasses", __name__)
@@ -57,6 +60,91 @@ def criar():
         (tipo, valor, data_ref, data.get("descricao"), conta_ml)
     )
     return jsonify(row), 201
+
+@bp.post("/sync-mp")
+@require_auth
+@require_admin
+def sync_mp():
+    token = config.MERCADO_PAGO_ACCESS_TOKEN
+    if not token:
+        return jsonify({"error": "MERCADO_PAGO_ACCESS_TOKEN não configurado"}), 503
+
+    mes = request.args.get("mes", date.today().strftime("%Y-%m"))
+    conta_ml = request.args.get("conta_ml", "YUSO")
+    if conta_ml not in CONTAS_VALIDAS:
+        return jsonify({"error": "conta_ml inválida"}), 400
+
+    try:
+        ano, month = int(mes[:4]), int(mes[5:7])
+    except ValueError:
+        return jsonify({"error": "mes deve ser YYYY-MM"}), 400
+
+    ultimo_dia = calendar.monthrange(ano, month)[1]
+    begin = f"{mes}-01T00:00:00.000-03:00"
+    end = f"{mes}-{ultimo_dia:02d}T23:59:59.999-03:00"
+
+    offset, limit, total_inserted = 0, 100, 0
+    pagamentos = []
+
+    while True:
+        resp = http_req.get(
+            "https://api.mercadopago.com/v1/payments/search",
+            headers={"Authorization": f"Bearer {token}"},
+            params={
+                "sort": "date_approved",
+                "criteria": "desc",
+                "range": "date_approved",
+                "begin_date": begin,
+                "end_date": end,
+                "status": "approved",
+                "limit": limit,
+                "offset": offset,
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return jsonify({"error": "Erro na API do Mercado Pago", "detail": resp.text[:300]}), 502
+
+        data = resp.json()
+        results = data.get("results", [])
+        pagamentos.extend(results)
+
+        paging = data.get("paging", {})
+        if offset + limit >= paging.get("total", 0):
+            break
+        offset += limit
+
+    db.execute(
+        "DELETE FROM fin_repasses_ml WHERE origem = 'pluggy' AND conta_ml = %s AND TO_CHAR(data_referencia, 'YYYY-MM') = %s",
+        (conta_ml, mes)
+    )
+
+    for p in pagamentos:
+        pid = str(p.get("id", ""))
+        data_ref = (p.get("date_approved") or "")[:10] or date.today().isoformat()
+        valor_bruto = float(p.get("transaction_amount") or 0)
+        valor_liquido = float(p.get("net_received_amount") or valor_bruto)
+        taxa = round(valor_bruto - valor_liquido, 2)
+        desc = p.get("description") or f"Pagamento MP #{pid}"
+
+        db.execute(
+            """INSERT INTO fin_repasses_ml
+               (tipo, valor, data_referencia, descricao, conta_ml, origem, pluggy_transaction_id)
+               VALUES (%s, %s, %s, %s, %s, 'pluggy', %s)""",
+            ("repasse", valor_bruto, data_ref, desc, conta_ml, pid)
+        )
+        total_inserted += 1
+
+        if taxa > 0:
+            db.execute(
+                """INSERT INTO fin_repasses_ml
+                   (tipo, valor, data_referencia, descricao, conta_ml, origem, pluggy_transaction_id)
+                   VALUES (%s, %s, %s, %s, %s, 'pluggy', %s)""",
+                ("tarifa", taxa, data_ref, f"Taxa MP #{pid}", conta_ml, f"fee_{pid}")
+            )
+
+    return jsonify({"sincronizados": len(pagamentos), "registros": total_inserted, "periodo": mes})
+
 
 @bp.get("/saldo")
 @require_auth
