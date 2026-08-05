@@ -6,6 +6,52 @@ bp = Blueprint("fornecedores", __name__)
 
 STATUS_PEDIDO_VALIDOS = {"pendente", "pago", "parcial"}
 
+@bp.post("")
+@require_auth
+@require_admin
+def criar_fornecedor():
+    data = request.get_json()
+    nome = (data.get("nome") or "").strip()
+    if not nome:
+        return jsonify({"error": "nome obrigatório"}), 400
+    apelido = (data.get("apelido") or "").strip() or None
+    tipo = data.get("tipo_pagamento", "variavel")
+    if tipo not in ("variavel", "fixo"):
+        tipo = "variavel"
+    row = db.execute(
+        "INSERT INTO fin_fornecedores (nome, apelido, tipo_pagamento) VALUES (%s, %s, %s) RETURNING *",
+        (nome, apelido, tipo)
+    )
+    return jsonify(row), 201
+
+
+@bp.put("/<fornecedor_id>")
+@require_auth
+@require_admin
+def editar_fornecedor(fornecedor_id):
+    data = request.get_json()
+    campos, params = [], []
+    if "nome" in data:
+        nome = (data["nome"] or "").strip()
+        if not nome:
+            return jsonify({"error": "nome não pode ser vazio"}), 400
+        campos.append("nome = %s")
+        params.append(nome)
+    if "apelido" in data:
+        campos.append("apelido = %s")
+        params.append((data["apelido"] or "").strip() or None)
+    if not campos:
+        return jsonify({"error": "nenhum campo para atualizar"}), 400
+    params.append(fornecedor_id)
+    row = db.execute(
+        f"UPDATE fin_fornecedores SET {', '.join(campos)} WHERE id = %s AND ativo = true RETURNING *",
+        tuple(params)
+    )
+    if not row:
+        return jsonify({"error": "Fornecedor não encontrado"}), 404
+    return jsonify(row)
+
+
 @bp.get("")
 @require_auth
 def listar():
