@@ -33,7 +33,7 @@ def gerar_connect_token():
     )
     resp.raise_for_status()
     access_token = resp.json()["accessToken"]
-    return jsonify({"url": f"https://connect.pluggy.ai/?connectToken={access_token}"})
+    return jsonify({"url": f"https://connect.pluggy.ai/?connect_token={access_token}"})
 
 
 @bp.get("/callback")
