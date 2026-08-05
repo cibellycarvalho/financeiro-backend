@@ -9,7 +9,7 @@ import db
 
 _jwks_client = PyJWKClient(
     f"{config.SUPABASE_URL}/auth/v1/.well-known/jwks.json",
-    cache_lifespan=3600,
+    lifespan=3600,
 )
 
 
