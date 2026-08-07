@@ -51,6 +51,34 @@ def editar_fornecedor(fornecedor_id):
     return jsonify(row)
 
 
+@bp.delete("/<fornecedor_id>")
+@require_auth
+@require_admin
+def excluir_fornecedor(fornecedor_id):
+    fornecedores = db.query(
+        "SELECT id FROM fin_fornecedores WHERE id = %s AND ativo = true",
+        (fornecedor_id,)
+    )
+    if not fornecedores:
+        return jsonify({"error": "Fornecedor não encontrado"}), 404
+
+    saldo_row = db.query(
+        """SELECT COALESCE(SUM(valor_total - valor_pago), 0) AS saldo_aberto
+           FROM fin_pedidos_fornecedor
+           WHERE fornecedor_id = %s AND status != 'pago'""",
+        (fornecedor_id,)
+    )
+    saldo_aberto = float(saldo_row[0]["saldo_aberto"])
+    if saldo_aberto > 0:
+        return jsonify({"error": "Fornecedor possui saldo em aberto e não pode ser excluído"}), 400
+
+    row = db.execute(
+        "UPDATE fin_fornecedores SET ativo = false WHERE id = %s RETURNING *",
+        (fornecedor_id,)
+    )
+    return jsonify(row)
+
+
 @bp.get("")
 @require_auth
 def listar():

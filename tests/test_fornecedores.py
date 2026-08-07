@@ -282,3 +282,39 @@ def test_registrar_pagamento_pedido_inexistente(client, admin_headers):
             headers=admin_headers
         )
     assert resp.status_code == 404
+
+
+def test_excluir_fornecedor_sem_saldo(client, admin_headers):
+    fornecedor_ativo = [{"id": FORNECEDOR_FIXTURE["id"]}]
+    saldo_zerado = [{"saldo_aberto": 0}]
+    with patch("routes.fornecedores.db.query", side_effect=[fornecedor_ativo, saldo_zerado]), \
+         patch("routes.fornecedores.db.execute",
+               return_value={**FORNECEDOR_FIXTURE, "ativo": False}) as mock_execute:
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}", headers=admin_headers
+        )
+    assert resp.status_code == 200
+    assert resp.get_json()["ativo"] is False
+    update_sql = mock_execute.call_args[0][0]
+    assert "ativo = false" in update_sql
+
+
+def test_excluir_fornecedor_com_saldo_retorna_erro(client, admin_headers):
+    fornecedor_ativo = [{"id": FORNECEDOR_FIXTURE["id"]}]
+    saldo_em_aberto = [{"saldo_aberto": 5600.00}]
+    with patch("routes.fornecedores.db.query", side_effect=[fornecedor_ativo, saldo_em_aberto]), \
+         patch("routes.fornecedores.db.execute") as mock_execute:
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}", headers=admin_headers
+        )
+    assert resp.status_code == 400
+    assert "saldo" in resp.get_json()["error"].lower()
+    mock_execute.assert_not_called()
+
+
+def test_excluir_fornecedor_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.query", return_value=[]):
+        resp = client.delete(
+            "/api/fornecedores/00000000-0000-0000-0000-000000000000", headers=admin_headers
+        )
+    assert resp.status_code == 404
