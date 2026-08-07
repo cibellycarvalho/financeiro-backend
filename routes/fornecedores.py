@@ -236,6 +236,28 @@ def atualizar_pedido(fornecedor_id, pedido_id):
     return jsonify(row)
 
 
+@bp.delete("/<fornecedor_id>/pedidos/<pedido_id>")
+@require_auth
+@require_admin
+def excluir_pedido(fornecedor_id, pedido_id):
+    pedidos = db.query(
+        "SELECT id FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pedido_id, fornecedor_id)
+    )
+    if not pedidos:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+
+    pagamentos = db.query("SELECT id FROM fin_pedido_pagamentos WHERE pedido_id = %s", (pedido_id,))
+    if pagamentos:
+        return jsonify({"error": "Este pedido tem pagamentos registrados; exclua os pagamentos antes de excluir o pedido"}), 400
+
+    db.execute(
+        "DELETE FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pedido_id, fornecedor_id)
+    )
+    return "", 204
+
+
 @bp.put("/<fornecedor_id>/pedidos/<pedido_id>/itens/<item_id>")
 @require_auth
 @require_admin
@@ -277,6 +299,39 @@ def editar_item(fornecedor_id, pedido_id, item_id):
         pedido_atualizado = _recalcular_pedido(cur, pedido_id, fornecedor_id)
 
     pedido_atualizado["item"] = item
+    return jsonify(pedido_atualizado)
+
+
+@bp.delete("/<fornecedor_id>/pedidos/<pedido_id>/itens/<item_id>")
+@require_auth
+@require_admin
+def excluir_item(fornecedor_id, pedido_id, item_id):
+    pedidos = db.query(
+        "SELECT id FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pedido_id, fornecedor_id)
+    )
+    if not pedidos:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+
+    itens = db.query("SELECT id FROM fin_pedido_itens WHERE pedido_id = %s", (pedido_id,))
+    if not any(i["id"] == item_id for i in itens):
+        return jsonify({"error": "Item não encontrado"}), 404
+    if len(itens) <= 1:
+        return jsonify({"error": "Este é o único produto do pedido; exclua o pedido inteiro se quiser removê-lo"}), 400
+
+    with db.transaction() as cur:
+        cur.execute(
+            "DELETE FROM fin_pedido_itens WHERE id = %s AND pedido_id = %s",
+            (item_id, pedido_id)
+        )
+        cur.execute(
+            """UPDATE fin_pedidos_fornecedor
+               SET valor_total = (SELECT COALESCE(SUM(valor_total), 0) FROM fin_pedido_itens WHERE pedido_id = %s)
+               WHERE id = %s""",
+            (pedido_id, pedido_id)
+        )
+        pedido_atualizado = _recalcular_pedido(cur, pedido_id, fornecedor_id)
+
     return jsonify(pedido_atualizado)
 
 
