@@ -524,3 +524,83 @@ def test_excluir_pedido_inexistente_retorna_404(client, admin_headers):
             headers=admin_headers
         )
     assert resp.status_code == 404
+
+
+def test_adicionar_item_a_pedido_existente(client, admin_headers):
+    item_criado = {"id": "i3", "pedido_id": PEDIDO_FIXTURE["id"], "produto": "Cabo USB-C",
+                   "quantidade": 500, "valor_unitario": 5.00, "valor_total": 2500.00}
+    soma_row = {"total": 0, "ultima_data": None}
+    valor_total_row = {"valor_total": 8100.00}
+    pedido_atualizado = {**PEDIDO_FIXTURE, "valor_total": 8100.00, "status": "pendente"}
+    mock_transaction, mock_cur = _mock_transaction_cursor(
+        [item_criado, soma_row, valor_total_row, pedido_atualizado]
+    )
+
+    with patch("routes.fornecedores.db.query", return_value=[{"id": PEDIDO_FIXTURE["id"]}]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
+        resp = client.post(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/itens",
+            json={"produto": "Cabo USB-C", "quantidade": 500, "valor_unitario": 5.00},
+            headers=admin_headers
+        )
+    assert resp.status_code == 201
+    body = resp.get_json()
+    assert body["valor_total"] == 8100.00
+    assert body["item"]["produto"] == "Cabo USB-C"
+
+    insert_sql = mock_cur.execute.call_args_list[0].args[0]
+    update_sql = mock_cur.execute.call_args_list[1].args[0]
+    assert "INSERT INTO fin_pedido_itens" in insert_sql
+    assert "SUM(valor_total)" in update_sql
+
+
+def test_adicionar_item_pedido_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.query", return_value=[]):
+        resp = client.post(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/naoexiste/itens",
+            json={"produto": "Cabo", "quantidade": 1, "valor_unitario": 10.00},
+            headers=admin_headers
+        )
+    assert resp.status_code == 404
+
+
+def test_adicionar_item_quantidade_invalida_retorna_erro(client, admin_headers):
+    resp = client.post(
+        f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/itens",
+        json={"produto": "Cabo", "quantidade": 0, "valor_unitario": 10.00},
+        headers=admin_headers
+    )
+    assert resp.status_code == 400
+
+
+def test_atualizar_pedido_data_pedido(client, admin_headers):
+    pedido_atualizado = {**PEDIDO_FIXTURE, "data_pedido": "2026-08-02"}
+    with patch("routes.fornecedores.db.execute", return_value=pedido_atualizado) as mock_execute:
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}",
+            json={"data_pedido": "2026-08-02"},
+            headers=admin_headers
+        )
+    assert resp.status_code == 200
+    assert resp.get_json()["data_pedido"] == "2026-08-02"
+    update_sql = mock_execute.call_args[0][0]
+    assert "data_pedido = %s" in update_sql
+
+
+def test_atualizar_pedido_data_pedido_vazia_retorna_erro(client, admin_headers):
+    resp = client.put(
+        f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}",
+        json={"data_pedido": ""},
+        headers=admin_headers
+    )
+    assert resp.status_code == 400
+
+
+def test_atualizar_pedido_data_pedido_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.execute", return_value=None):
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/naoexiste",
+            json={"data_pedido": "2026-08-02"},
+            headers=admin_headers
+        )
+    assert resp.status_code == 404

@@ -224,12 +224,23 @@ def atualizar_pedido(fornecedor_id, pedido_id):
             pedido_atualizado = _recalcular_pedido(cur, pedido_id, fornecedor_id)
         return jsonify(pedido_atualizado)
 
-    if "observacao" not in data:
+    campos, params = [], []
+    if "observacao" in data:
+        campos.append("observacao = %s")
+        params.append(data["observacao"])
+    if "data_pedido" in data:
+        if not data["data_pedido"]:
+            return jsonify({"error": "data_pedido não pode ser vazia"}), 400
+        campos.append("data_pedido = %s")
+        params.append(data["data_pedido"])
+
+    if not campos:
         return jsonify({"error": "nenhum campo para atualizar"}), 400
 
+    params += [pedido_id, fornecedor_id]
     row = db.execute(
-        "UPDATE fin_pedidos_fornecedor SET observacao = %s WHERE id = %s AND fornecedor_id = %s RETURNING *",
-        (data["observacao"], pedido_id, fornecedor_id)
+        f"UPDATE fin_pedidos_fornecedor SET {', '.join(campos)} WHERE id = %s AND fornecedor_id = %s RETURNING *",
+        tuple(params)
     )
     if not row:
         return jsonify({"error": "Pedido não encontrado"}), 404
@@ -256,6 +267,43 @@ def excluir_pedido(fornecedor_id, pedido_id):
         (pedido_id, fornecedor_id)
     )
     return "", 204
+
+
+@bp.post("/<fornecedor_id>/pedidos/<pedido_id>/itens")
+@require_auth
+@require_admin
+def adicionar_item(fornecedor_id, pedido_id):
+    data = request.get_json()
+    itens_validados, erro = _validar_itens([data])
+    if erro:
+        return jsonify({"error": erro}), 400
+    produto, quantidade, valor_unitario = itens_validados[0]
+
+    pedidos = db.query(
+        "SELECT id FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pedido_id, fornecedor_id)
+    )
+    if not pedidos:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+
+    with db.transaction() as cur:
+        cur.execute(
+            """INSERT INTO fin_pedido_itens (pedido_id, produto, quantidade, valor_unitario)
+               VALUES (%s, %s, %s, %s)
+               RETURNING *""",
+            (pedido_id, produto, quantidade, valor_unitario)
+        )
+        item = dict(cur.fetchone())
+        cur.execute(
+            """UPDATE fin_pedidos_fornecedor
+               SET valor_total = (SELECT COALESCE(SUM(valor_total), 0) FROM fin_pedido_itens WHERE pedido_id = %s)
+               WHERE id = %s""",
+            (pedido_id, pedido_id)
+        )
+        pedido_atualizado = _recalcular_pedido(cur, pedido_id, fornecedor_id)
+
+    pedido_atualizado["item"] = item
+    return jsonify(pedido_atualizado), 201
 
 
 @bp.put("/<fornecedor_id>/pedidos/<pedido_id>/itens/<item_id>")
