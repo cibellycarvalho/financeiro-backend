@@ -39,15 +39,18 @@ def test_list_fornecedores(client, admin_headers):
     assert resp.get_json()[0]["apelido"] == "FL"
 
 
-def test_list_pedidos_com_itens(client, admin_headers):
-    pedido_com_itens = {
+def test_list_pedidos_com_itens_e_pagamentos(client, admin_headers):
+    pedido_com_tudo = {
         **PEDIDO_FIXTURE,
         "itens": [
             {"id": "i1", "produto": "Cabo HDMI 8K 2M", "quantidade": 250,
              "valor_unitario": 10.00, "valor_total": 2500.00}
+        ],
+        "pagamentos": [
+            {"id": "p1", "valor": 1000.00, "data_pagamento": "2026-08-05"}
         ]
     }
-    with patch("routes.fornecedores.db.query", return_value=[pedido_com_itens]):
+    with patch("routes.fornecedores.db.query", return_value=[pedido_com_tudo]):
         resp = client.get(
             f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos",
             headers=admin_headers
@@ -56,6 +59,7 @@ def test_list_pedidos_com_itens(client, admin_headers):
     body = resp.get_json()[0]
     assert body["status"] == "pendente"
     assert body["itens"][0]["produto"] == "Cabo HDMI 8K 2M"
+    assert body["pagamentos"][0]["valor"] == 1000.00
 
 
 def test_create_pedido_com_itens(client, admin_headers):
@@ -112,11 +116,15 @@ def test_create_pedido_item_quantidade_invalida(client, admin_headers):
     assert resp.status_code == 400
 
 
-def test_registrar_pagamento_parcial(client, admin_headers):
+def test_registrar_pagamento_parcial_grava_historico(client, admin_headers):
+    pagamento_row = {"id": "pg1", "pedido_id": PEDIDO_FIXTURE["id"], "valor": 2000.00,
+                      "data_pagamento": "2026-08-05"}
     pedido_atualizado = {**PEDIDO_FIXTURE, "valor_pago": 2000.00, "status": "parcial",
                           "data_pagamento": "2026-08-05"}
+    mock_transaction, mock_cur = _mock_transaction_cursor([pagamento_row, pedido_atualizado])
+
     with patch("routes.fornecedores.db.query", return_value=[PEDIDO_FIXTURE]), \
-         patch("routes.fornecedores.db.execute", return_value=pedido_atualizado):
+         patch("routes.fornecedores.db.transaction", mock_transaction):
         resp = client.post(
             f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/pagamentos",
             json={"valor": 2000.00, "data_pagamento": "2026-08-05"},
@@ -126,13 +134,24 @@ def test_registrar_pagamento_parcial(client, admin_headers):
     body = resp.get_json()
     assert body["status"] == "parcial"
     assert body["valor_pago"] == 2000.00
+    assert body["pagamento"]["valor"] == 2000.00
+
+    # o INSERT do histórico precisa acontecer antes do UPDATE do pedido
+    insert_sql = mock_cur.execute.call_args_list[0].args[0]
+    update_sql = mock_cur.execute.call_args_list[1].args[0]
+    assert "INSERT INTO fin_pedido_pagamentos" in insert_sql
+    assert "UPDATE fin_pedidos_fornecedor" in update_sql
 
 
 def test_registrar_pagamento_completa_pedido(client, admin_headers):
+    pagamento_row = {"id": "pg1", "pedido_id": PEDIDO_FIXTURE["id"], "valor": 5600.00,
+                      "data_pagamento": "2026-08-10"}
     pedido_pago = {**PEDIDO_FIXTURE, "valor_pago": 5600.00, "status": "pago",
                    "data_pagamento": "2026-08-10"}
+    mock_transaction, _ = _mock_transaction_cursor([pagamento_row, pedido_pago])
+
     with patch("routes.fornecedores.db.query", return_value=[PEDIDO_FIXTURE]), \
-         patch("routes.fornecedores.db.execute", return_value=pedido_pago):
+         patch("routes.fornecedores.db.transaction", mock_transaction):
         resp = client.post(
             f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/pagamentos",
             json={"valor": 5600.00, "data_pagamento": "2026-08-10"},
@@ -144,18 +163,22 @@ def test_registrar_pagamento_completa_pedido(client, admin_headers):
 
 def test_registrar_pagamento_acumula_com_pagamento_anterior(client, admin_headers):
     pedido_parcial = {**PEDIDO_FIXTURE, "valor_pago": 2000.00, "status": "parcial"}
+    pagamento_row = {"id": "pg2", "pedido_id": PEDIDO_FIXTURE["id"], "valor": 3600.00,
+                      "data_pagamento": "2026-08-10"}
     pedido_completo = {**PEDIDO_FIXTURE, "valor_pago": 5600.00, "status": "pago",
                        "data_pagamento": "2026-08-10"}
+    mock_transaction, mock_cur = _mock_transaction_cursor([pagamento_row, pedido_completo])
+
     with patch("routes.fornecedores.db.query", return_value=[pedido_parcial]), \
-         patch("routes.fornecedores.db.execute", return_value=pedido_completo) as mock_execute:
+         patch("routes.fornecedores.db.transaction", mock_transaction):
         resp = client.post(
             f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/pagamentos",
             json={"valor": 3600.00, "data_pagamento": "2026-08-10"},
             headers=admin_headers
         )
     assert resp.status_code == 200
-    # 2000 (já pago) + 3600 (novo) = 5600 -> deve mandar 5600.0 pro UPDATE
-    update_params = mock_execute.call_args.args[1]
+    # 2000 (já pago) + 3600 (novo) = 5600 -> deve mandar 5600.0 pro UPDATE do pedido
+    update_params = mock_cur.execute.call_args_list[1].args[1]
     assert 5600.0 in update_params
 
 

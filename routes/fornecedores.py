@@ -80,17 +80,21 @@ def listar_pedidos(fornecedor_id):
     rows = db.query(
         f"""SELECT p.*,
                    COALESCE(
-                     json_agg(
-                       json_build_object(
-                         'id', i.id, 'produto', i.produto, 'quantidade', i.quantidade,
-                         'valor_unitario', i.valor_unitario, 'valor_total', i.valor_total
-                       ) ORDER BY i.created_at
-                     ) FILTER (WHERE i.id IS NOT NULL), '[]'
-                   ) AS itens
+                     (SELECT json_agg(
+                        json_build_object(
+                          'id', i.id, 'produto', i.produto, 'quantidade', i.quantidade,
+                          'valor_unitario', i.valor_unitario, 'valor_total', i.valor_total
+                        ) ORDER BY i.created_at
+                      ) FROM fin_pedido_itens i WHERE i.pedido_id = p.id), '[]'
+                   ) AS itens,
+                   COALESCE(
+                     (SELECT json_agg(
+                        json_build_object('id', pg.id, 'valor', pg.valor, 'data_pagamento', pg.data_pagamento)
+                        ORDER BY pg.data_pagamento, pg.created_at
+                      ) FROM fin_pedido_pagamentos pg WHERE pg.pedido_id = p.id), '[]'
+                   ) AS pagamentos
             FROM fin_pedidos_fornecedor p
-            LEFT JOIN fin_pedido_itens i ON i.pedido_id = p.id
             WHERE {where}
-            GROUP BY p.id
             ORDER BY p.data_pedido DESC""",
         tuple(params)
     )
@@ -205,11 +209,23 @@ def registrar_pagamento(fornecedor_id, pedido_id):
     novo_valor_pago = float(pedido["valor_pago"]) + valor
     novo_status = "pago" if novo_valor_pago >= float(pedido["valor_total"]) else "parcial"
 
-    row = db.execute(
-        """UPDATE fin_pedidos_fornecedor
-           SET valor_pago = %s, status = %s, data_pagamento = %s
-           WHERE id = %s AND fornecedor_id = %s
-           RETURNING *""",
-        (novo_valor_pago, novo_status, data["data_pagamento"], pedido_id, fornecedor_id)
-    )
-    return jsonify(row)
+    with db.transaction() as cur:
+        cur.execute(
+            """INSERT INTO fin_pedido_pagamentos (pedido_id, valor, data_pagamento, criado_por)
+               VALUES (%s, %s, %s, %s)
+               RETURNING *""",
+            (pedido_id, valor, data["data_pagamento"], g.user["user_id"])
+        )
+        pagamento = dict(cur.fetchone())
+
+        cur.execute(
+            """UPDATE fin_pedidos_fornecedor
+               SET valor_pago = %s, status = %s, data_pagamento = %s
+               WHERE id = %s AND fornecedor_id = %s
+               RETURNING *""",
+            (novo_valor_pago, novo_status, data["data_pagamento"], pedido_id, fornecedor_id)
+        )
+        pedido_atualizado = dict(cur.fetchone())
+
+    pedido_atualizado["pagamento"] = pagamento
+    return jsonify(pedido_atualizado)
