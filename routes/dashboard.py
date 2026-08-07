@@ -41,12 +41,15 @@ def dashboard():
     total_pendente = sum(c["valor"] for c in contas_pendentes_mes)
 
     fornecedores_aberto = db.query("""
-        SELECT f.nome, COALESCE(SUM(p.valor_total - p.valor_pago), 0) AS saldo_aberto
-        FROM fin_fornecedores f
-        JOIN fin_pedidos_fornecedor p ON p.fornecedor_id = f.id AND p.status != 'pago'
-        GROUP BY f.id, f.nome
-        HAVING SUM(p.valor_total - p.valor_pago) > 0
-        ORDER BY saldo_aberto DESC
+        WITH saldos AS (
+            SELECT f.nome,
+                   COALESCE((SELECT SUM(p.valor_total) FROM fin_pedidos_fornecedor p WHERE p.fornecedor_id = f.id), 0)
+                   - COALESCE((SELECT SUM(pg.valor) FROM fin_pagamentos_fornecedor pg WHERE pg.fornecedor_id = f.id), 0)
+                   AS saldo_aberto
+            FROM fin_fornecedores f
+            WHERE f.ativo = true
+        )
+        SELECT * FROM saldos WHERE saldo_aberto > 0 ORDER BY saldo_aberto DESC
     """)
     total_fornecedores = sum(f["saldo_aberto"] for f in fornecedores_aberto)
 
