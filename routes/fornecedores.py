@@ -180,6 +180,37 @@ def atualizar_pedido(fornecedor_id, pedido_id):
     return jsonify(row)
 
 
+def _recalcular_pedido(cur, pedido_id, fornecedor_id):
+    """Recalcula valor_pago/status do pedido somando fin_pedido_pagamentos.
+    Deve rodar dentro de uma transação, após inserir/editar/excluir um pagamento."""
+    cur.execute(
+        "SELECT COALESCE(SUM(valor), 0) AS total, MAX(data_pagamento) AS ultima_data "
+        "FROM fin_pedido_pagamentos WHERE pedido_id = %s",
+        (pedido_id,)
+    )
+    soma = dict(cur.fetchone())
+    total_pago = float(soma["total"])
+
+    cur.execute("SELECT valor_total FROM fin_pedidos_fornecedor WHERE id = %s", (pedido_id,))
+    valor_total = float(dict(cur.fetchone())["valor_total"])
+
+    if total_pago >= valor_total:
+        novo_status = "pago"
+    elif total_pago > 0:
+        novo_status = "parcial"
+    else:
+        novo_status = "pendente"
+
+    cur.execute(
+        """UPDATE fin_pedidos_fornecedor
+           SET valor_pago = %s, status = %s, data_pagamento = %s
+           WHERE id = %s AND fornecedor_id = %s
+           RETURNING *""",
+        (total_pago, novo_status, soma["ultima_data"], pedido_id, fornecedor_id)
+    )
+    return dict(cur.fetchone())
+
+
 @bp.post("/<fornecedor_id>/pedidos/<pedido_id>/pagamentos")
 @require_auth
 @require_admin
@@ -206,9 +237,6 @@ def registrar_pagamento(fornecedor_id, pedido_id):
     if valor > saldo_restante:
         return jsonify({"error": f"Valor maior que o saldo restante (R$ {saldo_restante:.2f})"}), 400
 
-    novo_valor_pago = float(pedido["valor_pago"]) + valor
-    novo_status = "pago" if novo_valor_pago >= float(pedido["valor_total"]) else "parcial"
-
     with db.transaction() as cur:
         cur.execute(
             """INSERT INTO fin_pedido_pagamentos (pedido_id, valor, data_pagamento, criado_por)
@@ -217,15 +245,83 @@ def registrar_pagamento(fornecedor_id, pedido_id):
             (pedido_id, valor, data["data_pagamento"], g.user["user_id"])
         )
         pagamento = dict(cur.fetchone())
-
-        cur.execute(
-            """UPDATE fin_pedidos_fornecedor
-               SET valor_pago = %s, status = %s, data_pagamento = %s
-               WHERE id = %s AND fornecedor_id = %s
-               RETURNING *""",
-            (novo_valor_pago, novo_status, data["data_pagamento"], pedido_id, fornecedor_id)
-        )
-        pedido_atualizado = dict(cur.fetchone())
+        pedido_atualizado = _recalcular_pedido(cur, pedido_id, fornecedor_id)
 
     pedido_atualizado["pagamento"] = pagamento
+    return jsonify(pedido_atualizado)
+
+
+@bp.put("/<fornecedor_id>/pedidos/<pedido_id>/pagamentos/<pagamento_id>")
+@require_auth
+@require_admin
+def editar_pagamento(fornecedor_id, pedido_id, pagamento_id):
+    data = request.get_json()
+    try:
+        valor = float(data.get("valor"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "valor inválido"}), 400
+    if valor <= 0:
+        return jsonify({"error": "valor deve ser maior que zero"}), 400
+    if not data.get("data_pagamento"):
+        return jsonify({"error": "data_pagamento obrigatória"}), 400
+
+    pedidos = db.query(
+        "SELECT * FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pedido_id, fornecedor_id)
+    )
+    if not pedidos:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+    pedido = pedidos[0]
+
+    pagamentos_atuais = db.query(
+        "SELECT valor FROM fin_pedido_pagamentos WHERE id = %s AND pedido_id = %s",
+        (pagamento_id, pedido_id)
+    )
+    if not pagamentos_atuais:
+        return jsonify({"error": "Pagamento não encontrado"}), 404
+    valor_atual = float(pagamentos_atuais[0]["valor"])
+
+    saldo_sem_este = float(pedido["valor_total"]) - (float(pedido["valor_pago"]) - valor_atual)
+    if valor > saldo_sem_este:
+        return jsonify({"error": f"Valor maior que o saldo disponível (R$ {saldo_sem_este:.2f})"}), 400
+
+    with db.transaction() as cur:
+        cur.execute(
+            """UPDATE fin_pedido_pagamentos SET valor = %s, data_pagamento = %s
+               WHERE id = %s AND pedido_id = %s
+               RETURNING *""",
+            (valor, data["data_pagamento"], pagamento_id, pedido_id)
+        )
+        pagamento = dict(cur.fetchone())
+        pedido_atualizado = _recalcular_pedido(cur, pedido_id, fornecedor_id)
+
+    pedido_atualizado["pagamento"] = pagamento
+    return jsonify(pedido_atualizado)
+
+
+@bp.delete("/<fornecedor_id>/pedidos/<pedido_id>/pagamentos/<pagamento_id>")
+@require_auth
+@require_admin
+def excluir_pagamento(fornecedor_id, pedido_id, pagamento_id):
+    pedidos = db.query(
+        "SELECT id FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pedido_id, fornecedor_id)
+    )
+    if not pedidos:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+
+    pagamentos = db.query(
+        "SELECT id FROM fin_pedido_pagamentos WHERE id = %s AND pedido_id = %s",
+        (pagamento_id, pedido_id)
+    )
+    if not pagamentos:
+        return jsonify({"error": "Pagamento não encontrado"}), 404
+
+    with db.transaction() as cur:
+        cur.execute(
+            "DELETE FROM fin_pedido_pagamentos WHERE id = %s AND pedido_id = %s",
+            (pagamento_id, pedido_id)
+        )
+        pedido_atualizado = _recalcular_pedido(cur, pedido_id, fornecedor_id)
+
     return jsonify(pedido_atualizado)

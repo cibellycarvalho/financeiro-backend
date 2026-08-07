@@ -119,9 +119,13 @@ def test_create_pedido_item_quantidade_invalida(client, admin_headers):
 def test_registrar_pagamento_parcial_grava_historico(client, admin_headers):
     pagamento_row = {"id": "pg1", "pedido_id": PEDIDO_FIXTURE["id"], "valor": 2000.00,
                       "data_pagamento": "2026-08-05"}
+    soma_row = {"total": 2000.00, "ultima_data": "2026-08-05"}
+    valor_total_row = {"valor_total": 5600.00}
     pedido_atualizado = {**PEDIDO_FIXTURE, "valor_pago": 2000.00, "status": "parcial",
                           "data_pagamento": "2026-08-05"}
-    mock_transaction, mock_cur = _mock_transaction_cursor([pagamento_row, pedido_atualizado])
+    mock_transaction, mock_cur = _mock_transaction_cursor(
+        [pagamento_row, soma_row, valor_total_row, pedido_atualizado]
+    )
 
     with patch("routes.fornecedores.db.query", return_value=[PEDIDO_FIXTURE]), \
          patch("routes.fornecedores.db.transaction", mock_transaction):
@@ -136,9 +140,9 @@ def test_registrar_pagamento_parcial_grava_historico(client, admin_headers):
     assert body["valor_pago"] == 2000.00
     assert body["pagamento"]["valor"] == 2000.00
 
-    # o INSERT do histórico precisa acontecer antes do UPDATE do pedido
+    # o INSERT do histórico precisa acontecer antes do recálculo/UPDATE do pedido
     insert_sql = mock_cur.execute.call_args_list[0].args[0]
-    update_sql = mock_cur.execute.call_args_list[1].args[0]
+    update_sql = mock_cur.execute.call_args_list[3].args[0]
     assert "INSERT INTO fin_pedido_pagamentos" in insert_sql
     assert "UPDATE fin_pedidos_fornecedor" in update_sql
 
@@ -146,9 +150,13 @@ def test_registrar_pagamento_parcial_grava_historico(client, admin_headers):
 def test_registrar_pagamento_completa_pedido(client, admin_headers):
     pagamento_row = {"id": "pg1", "pedido_id": PEDIDO_FIXTURE["id"], "valor": 5600.00,
                       "data_pagamento": "2026-08-10"}
+    soma_row = {"total": 5600.00, "ultima_data": "2026-08-10"}
+    valor_total_row = {"valor_total": 5600.00}
     pedido_pago = {**PEDIDO_FIXTURE, "valor_pago": 5600.00, "status": "pago",
                    "data_pagamento": "2026-08-10"}
-    mock_transaction, _ = _mock_transaction_cursor([pagamento_row, pedido_pago])
+    mock_transaction, _ = _mock_transaction_cursor(
+        [pagamento_row, soma_row, valor_total_row, pedido_pago]
+    )
 
     with patch("routes.fornecedores.db.query", return_value=[PEDIDO_FIXTURE]), \
          patch("routes.fornecedores.db.transaction", mock_transaction):
@@ -165,9 +173,13 @@ def test_registrar_pagamento_acumula_com_pagamento_anterior(client, admin_header
     pedido_parcial = {**PEDIDO_FIXTURE, "valor_pago": 2000.00, "status": "parcial"}
     pagamento_row = {"id": "pg2", "pedido_id": PEDIDO_FIXTURE["id"], "valor": 3600.00,
                       "data_pagamento": "2026-08-10"}
+    soma_row = {"total": 5600.00, "ultima_data": "2026-08-10"}
+    valor_total_row = {"valor_total": 5600.00}
     pedido_completo = {**PEDIDO_FIXTURE, "valor_pago": 5600.00, "status": "pago",
                        "data_pagamento": "2026-08-10"}
-    mock_transaction, mock_cur = _mock_transaction_cursor([pagamento_row, pedido_completo])
+    mock_transaction, mock_cur = _mock_transaction_cursor(
+        [pagamento_row, soma_row, valor_total_row, pedido_completo]
+    )
 
     with patch("routes.fornecedores.db.query", return_value=[pedido_parcial]), \
          patch("routes.fornecedores.db.transaction", mock_transaction):
@@ -177,9 +189,79 @@ def test_registrar_pagamento_acumula_com_pagamento_anterior(client, admin_header
             headers=admin_headers
         )
     assert resp.status_code == 200
-    # 2000 (já pago) + 3600 (novo) = 5600 -> deve mandar 5600.0 pro UPDATE do pedido
-    update_params = mock_cur.execute.call_args_list[1].args[1]
+    # soma dos pagamentos (2000 já existente + 3600 novo) = 5600 -> valor_pago final
+    assert resp.get_json()["valor_pago"] == 5600.00
+    # o recálculo usa a soma vinda do banco (mockada), não faz conta em Python
+    update_params = mock_cur.execute.call_args_list[3].args[1]
     assert 5600.0 in update_params
+
+
+def test_editar_pagamento_ajusta_valor(client, admin_headers):
+    soma_row = {"total": 1500.00, "ultima_data": "2026-08-05"}
+    valor_total_row = {"valor_total": 5600.00}
+    pagamento_editado = {"id": "pg1", "pedido_id": PEDIDO_FIXTURE["id"], "valor": 1500.00,
+                          "data_pagamento": "2026-08-05"}
+    pedido_atualizado = {**PEDIDO_FIXTURE, "valor_pago": 1500.00, "status": "parcial"}
+    mock_transaction, mock_cur = _mock_transaction_cursor(
+        [pagamento_editado, soma_row, valor_total_row, pedido_atualizado]
+    )
+
+    pedido_com_pagamento_antigo = {**PEDIDO_FIXTURE, "valor_pago": 2000.00, "status": "parcial"}
+    with patch("routes.fornecedores.db.query", side_effect=[
+            [pedido_com_pagamento_antigo], [{"valor": 2000.00}]
+        ]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/pagamentos/pg1",
+            json={"valor": 1500.00, "data_pagamento": "2026-08-05"},
+            headers=admin_headers
+        )
+    assert resp.status_code == 200
+    assert resp.get_json()["valor_pago"] == 1500.00
+    assert resp.get_json()["pagamento"]["valor"] == 1500.00
+
+
+def test_editar_pagamento_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.query", side_effect=[[PEDIDO_FIXTURE], []]):
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/pagamentos/naoexiste",
+            json={"valor": 100.00, "data_pagamento": "2026-08-05"},
+            headers=admin_headers
+        )
+    assert resp.status_code == 404
+
+
+def test_excluir_pagamento(client, admin_headers):
+    soma_row = {"total": 0, "ultima_data": None}
+    valor_total_row = {"valor_total": 5600.00}
+    pedido_atualizado = {**PEDIDO_FIXTURE, "valor_pago": 0, "status": "pendente"}
+    mock_transaction, mock_cur = _mock_transaction_cursor(
+        [soma_row, valor_total_row, pedido_atualizado]
+    )
+
+    with patch("routes.fornecedores.db.query", side_effect=[
+            [{"id": PEDIDO_FIXTURE["id"]}], [{"id": "pg1"}]
+        ]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/pagamentos/pg1",
+            headers=admin_headers
+        )
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "pendente"
+    assert resp.get_json()["valor_pago"] == 0
+
+    delete_sql = mock_cur.execute.call_args_list[0].args[0]
+    assert "DELETE FROM fin_pedido_pagamentos" in delete_sql
+
+
+def test_excluir_pagamento_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.query", side_effect=[[{"id": PEDIDO_FIXTURE["id"]}], []]):
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/pagamentos/naoexiste",
+            headers=admin_headers
+        )
+    assert resp.status_code == 404
 
 
 def test_registrar_pagamento_maior_que_saldo_retorna_erro(client, admin_headers):
