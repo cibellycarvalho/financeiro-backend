@@ -430,3 +430,97 @@ def test_atualizar_pedido_valor_total_pedido_inexistente_retorna_404(client, adm
             headers=admin_headers
         )
     assert resp.status_code == 404
+
+
+def test_excluir_item_com_mais_de_um_produto(client, admin_headers):
+    soma_row = {"total": 0, "ultima_data": None}
+    valor_total_row = {"valor_total": 3500.00}
+    pedido_atualizado = {**PEDIDO_FIXTURE, "valor_total": 3500.00, "status": "pendente"}
+    mock_transaction, mock_cur = _mock_transaction_cursor(
+        [soma_row, valor_total_row, pedido_atualizado]
+    )
+
+    with patch("routes.fornecedores.db.query", side_effect=[
+            [{"id": PEDIDO_FIXTURE["id"]}], [{"id": "i1"}, {"id": "i2"}]
+        ]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/itens/i1",
+            headers=admin_headers
+        )
+    assert resp.status_code == 200
+    assert resp.get_json()["valor_total"] == 3500.00
+
+    delete_sql = mock_cur.execute.call_args_list[0].args[0]
+    update_sql = mock_cur.execute.call_args_list[1].args[0]
+    assert "DELETE FROM fin_pedido_itens" in delete_sql
+    assert "SUM(valor_total)" in update_sql
+
+
+def test_excluir_item_unico_retorna_erro(client, admin_headers):
+    with patch("routes.fornecedores.db.query", side_effect=[
+            [{"id": PEDIDO_FIXTURE["id"]}], [{"id": "i1"}]
+        ]):
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/itens/i1",
+            headers=admin_headers
+        )
+    assert resp.status_code == 400
+    assert "único" in resp.get_json()["error"].lower()
+
+
+def test_excluir_item_pedido_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.query", return_value=[]):
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/naoexiste/itens/i1",
+            headers=admin_headers
+        )
+    assert resp.status_code == 404
+
+
+def test_excluir_item_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.query", side_effect=[
+            [{"id": PEDIDO_FIXTURE["id"]}], [{"id": "i2"}, {"id": "i3"}]
+        ]):
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/itens/naoexiste",
+            headers=admin_headers
+        )
+    assert resp.status_code == 404
+
+
+def test_excluir_pedido_sem_pagamentos(client, admin_headers):
+    with patch("routes.fornecedores.db.query", side_effect=[
+            [{"id": PEDIDO_FIXTURE["id"]}], []
+        ]), \
+         patch("routes.fornecedores.db.execute") as mock_execute:
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}",
+            headers=admin_headers
+        )
+    assert resp.status_code == 204
+    delete_sql = mock_execute.call_args[0][0]
+    assert "DELETE FROM fin_pedidos_fornecedor" in delete_sql
+
+
+def test_excluir_pedido_com_pagamentos_retorna_erro(client, admin_headers):
+    with patch("routes.fornecedores.db.query", side_effect=[
+            [{"id": PEDIDO_FIXTURE["id"]}], [{"id": "pg1"}]
+        ]), \
+         patch("routes.fornecedores.db.execute") as mock_execute:
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}",
+            headers=admin_headers
+        )
+    assert resp.status_code == 400
+    assert "pagamento" in resp.get_json()["error"].lower()
+    mock_execute.assert_not_called()
+
+
+def test_excluir_pedido_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.query", return_value=[]):
+        resp = client.delete(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/naoexiste",
+            headers=admin_headers
+        )
+    assert resp.status_code == 404
