@@ -318,3 +318,115 @@ def test_excluir_fornecedor_inexistente_retorna_404(client, admin_headers):
             "/api/fornecedores/00000000-0000-0000-0000-000000000000", headers=admin_headers
         )
     assert resp.status_code == 404
+
+
+def test_editar_item_atualiza_valor_total_e_status(client, admin_headers):
+    item_editado = {"id": "i1", "pedido_id": PEDIDO_FIXTURE["id"], "produto": "Cabo HDMI 8K 2M",
+                     "quantidade": 300, "valor_unitario": 12.00, "valor_total": 3600.00}
+    soma_row = {"total": 0, "ultima_data": None}
+    valor_total_row = {"valor_total": 3600.00}
+    pedido_atualizado = {**PEDIDO_FIXTURE, "valor_total": 3600.00, "status": "pendente"}
+    mock_transaction, mock_cur = _mock_transaction_cursor(
+        [item_editado, soma_row, valor_total_row, pedido_atualizado]
+    )
+
+    with patch("routes.fornecedores.db.query", side_effect=[
+            [{"id": PEDIDO_FIXTURE["id"]}], [{"id": "i1"}]
+        ]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/itens/i1",
+            json={"produto": "Cabo HDMI 8K 2M", "quantidade": 300, "valor_unitario": 12.00},
+            headers=admin_headers
+        )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["valor_total"] == 3600.00
+    assert body["item"]["valor_total"] == 3600.00
+
+    # o total do pedido é recalculado a partir da soma dos itens, não do valor enviado
+    update_sql = mock_cur.execute.call_args_list[1].args[0]
+    assert "UPDATE fin_pedidos_fornecedor" in update_sql
+    assert "SUM(valor_total)" in update_sql
+
+
+def test_editar_item_quantidade_invalida_retorna_erro(client, admin_headers):
+    resp = client.put(
+        f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/itens/i1",
+        json={"produto": "Cabo", "quantidade": 0, "valor_unitario": 10.00},
+        headers=admin_headers
+    )
+    assert resp.status_code == 400
+
+
+def test_editar_item_pedido_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.query", return_value=[]):
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/naoexiste/itens/i1",
+            json={"produto": "Cabo", "quantidade": 1, "valor_unitario": 10.00},
+            headers=admin_headers
+        )
+    assert resp.status_code == 404
+
+
+def test_editar_item_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.query", side_effect=[[{"id": PEDIDO_FIXTURE["id"]}], []]):
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}/itens/naoexiste",
+            json={"produto": "Cabo", "quantidade": 1, "valor_unitario": 10.00},
+            headers=admin_headers
+        )
+    assert resp.status_code == 404
+
+
+def test_atualizar_pedido_valor_total_sem_itens(client, admin_headers):
+    soma_row = {"total": 0, "ultima_data": None}
+    valor_total_row = {"valor_total": 90000.00}
+    pedido_atualizado = {**PEDIDO_FIXTURE, "valor_total": 90000.00, "status": "pendente"}
+    mock_transaction, mock_cur = _mock_transaction_cursor(
+        [soma_row, valor_total_row, pedido_atualizado]
+    )
+
+    with patch("routes.fornecedores.db.query", side_effect=[
+            [{"id": PEDIDO_FIXTURE["id"]}], []
+        ]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}",
+            json={"valor_total": 90000.00},
+            headers=admin_headers
+        )
+    assert resp.status_code == 200
+    assert resp.get_json()["valor_total"] == 90000.00
+
+
+def test_atualizar_pedido_valor_total_com_itens_retorna_erro(client, admin_headers):
+    with patch("routes.fornecedores.db.query", side_effect=[
+            [{"id": PEDIDO_FIXTURE["id"]}], [{"id": "i1"}]
+        ]):
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}",
+            json={"valor_total": 90000.00},
+            headers=admin_headers
+        )
+    assert resp.status_code == 400
+    assert "produtos" in resp.get_json()["error"].lower()
+
+
+def test_atualizar_pedido_valor_total_invalido(client, admin_headers):
+    resp = client.put(
+        f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/{PEDIDO_FIXTURE['id']}",
+        json={"valor_total": 0},
+        headers=admin_headers
+    )
+    assert resp.status_code == 400
+
+
+def test_atualizar_pedido_valor_total_pedido_inexistente_retorna_404(client, admin_headers):
+    with patch("routes.fornecedores.db.query", return_value=[]):
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos/naoexiste",
+            json={"valor_total": 100.00},
+            headers=admin_headers
+        )
+    assert resp.status_code == 404

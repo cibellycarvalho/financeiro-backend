@@ -196,6 +196,34 @@ def criar_pedido(fornecedor_id):
 @require_admin
 def atualizar_pedido(fornecedor_id, pedido_id):
     data = request.get_json()
+
+    if "valor_total" in data:
+        try:
+            valor_total = float(data["valor_total"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "valor_total inválido"}), 400
+        if valor_total <= 0:
+            return jsonify({"error": "valor_total deve ser maior que zero"}), 400
+
+        pedidos = db.query(
+            "SELECT id FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+            (pedido_id, fornecedor_id)
+        )
+        if not pedidos:
+            return jsonify({"error": "Pedido não encontrado"}), 404
+
+        itens = db.query("SELECT id FROM fin_pedido_itens WHERE pedido_id = %s", (pedido_id,))
+        if itens:
+            return jsonify({"error": "Este pedido tem produtos cadastrados; edite os produtos individualmente"}), 400
+
+        with db.transaction() as cur:
+            cur.execute(
+                "UPDATE fin_pedidos_fornecedor SET valor_total = %s WHERE id = %s AND fornecedor_id = %s",
+                (valor_total, pedido_id, fornecedor_id)
+            )
+            pedido_atualizado = _recalcular_pedido(cur, pedido_id, fornecedor_id)
+        return jsonify(pedido_atualizado)
+
     if "observacao" not in data:
         return jsonify({"error": "nenhum campo para atualizar"}), 400
 
@@ -206,6 +234,50 @@ def atualizar_pedido(fornecedor_id, pedido_id):
     if not row:
         return jsonify({"error": "Pedido não encontrado"}), 404
     return jsonify(row)
+
+
+@bp.put("/<fornecedor_id>/pedidos/<pedido_id>/itens/<item_id>")
+@require_auth
+@require_admin
+def editar_item(fornecedor_id, pedido_id, item_id):
+    data = request.get_json()
+    itens_validados, erro = _validar_itens([data])
+    if erro:
+        return jsonify({"error": erro}), 400
+    produto, quantidade, valor_unitario = itens_validados[0]
+
+    pedidos = db.query(
+        "SELECT id FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pedido_id, fornecedor_id)
+    )
+    if not pedidos:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+
+    itens = db.query(
+        "SELECT id FROM fin_pedido_itens WHERE id = %s AND pedido_id = %s",
+        (item_id, pedido_id)
+    )
+    if not itens:
+        return jsonify({"error": "Item não encontrado"}), 404
+
+    with db.transaction() as cur:
+        cur.execute(
+            """UPDATE fin_pedido_itens SET produto = %s, quantidade = %s, valor_unitario = %s
+               WHERE id = %s AND pedido_id = %s
+               RETURNING *""",
+            (produto, quantidade, valor_unitario, item_id, pedido_id)
+        )
+        item = dict(cur.fetchone())
+        cur.execute(
+            """UPDATE fin_pedidos_fornecedor
+               SET valor_total = (SELECT COALESCE(SUM(valor_total), 0) FROM fin_pedido_itens WHERE pedido_id = %s)
+               WHERE id = %s""",
+            (pedido_id, pedido_id)
+        )
+        pedido_atualizado = _recalcular_pedido(cur, pedido_id, fornecedor_id)
+
+    pedido_atualizado["item"] = item
+    return jsonify(pedido_atualizado)
 
 
 def _recalcular_pedido(cur, pedido_id, fornecedor_id):
