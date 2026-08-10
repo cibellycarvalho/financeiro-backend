@@ -18,3 +18,19 @@ def parse_ofx(file_stream):
             "descricao": (txn.memo or txn.payee or "")[:200],
         })
     return transacoes
+
+
+def melhor_candidato(data_transacao, candidatos, usados):
+    melhor = None
+    menor_diff = None
+    for c in candidatos:
+        chave = (c["tabela"], c["id"])
+        if chave in usados:
+            continue
+        diff = abs((c["data"] - data_transacao).days)
+        if diff > JANELA_DIAS:
+            continue
+        if menor_diff is None or diff < menor_diff:
+            menor_diff = diff
+            melhor = c
+    return melhor

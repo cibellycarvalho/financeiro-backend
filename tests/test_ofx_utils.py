@@ -1,5 +1,6 @@
 import os
-from ofx_utils import parse_ofx
+from datetime import date
+from ofx_utils import parse_ofx, melhor_candidato
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "extrato_exemplo.ofx")
 
@@ -20,3 +21,28 @@ def test_parse_ofx_extrai_debito_e_credito():
     assert credito["valor"] == 1200.50
     assert credito["data"] == "2026-08-06"
     assert credito["fitid"] == "2026080600002"
+
+
+def test_melhor_candidato_escolhe_mais_proximo_na_janela():
+    candidatos = [
+        {"id": "a1", "data": date(2026, 8, 2), "tabela": "fin_contas_pagar"},
+        {"id": "a2", "data": date(2026, 8, 5), "tabela": "fin_contas_pagar"},
+    ]
+    resultado = melhor_candidato(date(2026, 8, 5), candidatos, usados=set())
+    assert resultado["id"] == "a2"
+
+
+def test_melhor_candidato_ignora_fora_da_janela():
+    candidatos = [{"id": "a1", "data": date(2026, 7, 1), "tabela": "fin_contas_pagar"}]
+    resultado = melhor_candidato(date(2026, 8, 5), candidatos, usados=set())
+    assert resultado is None
+
+
+def test_melhor_candidato_ignora_ids_ja_usados():
+    candidatos = [{"id": "a1", "data": date(2026, 8, 5), "tabela": "fin_contas_pagar"}]
+    resultado = melhor_candidato(date(2026, 8, 5), candidatos, usados={("fin_contas_pagar", "a1")})
+    assert resultado is None
+
+
+def test_melhor_candidato_retorna_none_sem_candidatos():
+    assert melhor_candidato(date(2026, 8, 5), [], usados=set()) is None
