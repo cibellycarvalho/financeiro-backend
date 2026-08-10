@@ -13,10 +13,3 @@ ALLOWED_ORIGINS = os.environ.get(
 ).split(",")
 
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
-
-PLUGGY_CLIENT_ID = os.environ.get("PLUGGY_CLIENT_ID", "")
-PLUGGY_CLIENT_SECRET = os.environ.get("PLUGGY_CLIENT_SECRET", "")
-PLUGGY_REDIRECT_URL = os.environ.get(
-    "PLUGGY_REDIRECT_URL",
-    "https://financeiro.sellerml.com.br/api/pluggy/callback",
-)

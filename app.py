@@ -13,14 +13,14 @@ def create_app():
     from routes.fornecedores import bp as fornecedores_bp
     from routes.dashboard import bp as dashboard_bp
     from routes.usuarios import bp as usuarios_bp
-    from routes.pluggy import bp as pluggy_bp
+    from routes.conciliacao import bp as conciliacao_bp
 
     app.register_blueprint(contas_bp, url_prefix="/api/contas")
     app.register_blueprint(repasses_bp, url_prefix="/api/repasses")
     app.register_blueprint(fornecedores_bp, url_prefix="/api/fornecedores")
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
     app.register_blueprint(usuarios_bp, url_prefix="/api/usuarios")
-    app.register_blueprint(pluggy_bp, url_prefix="/api/pluggy")
+    app.register_blueprint(conciliacao_bp, url_prefix="/api/conciliacao")
 
     @app.get("/health")
     def health():
