@@ -46,3 +46,12 @@ def test_melhor_candidato_ignora_ids_ja_usados():
 
 def test_melhor_candidato_retorna_none_sem_candidatos():
     assert melhor_candidato(date(2026, 8, 5), [], usados=set()) is None
+
+
+def test_melhor_candidato_janela_inclusiva_exatamente_3_dias():
+    # Boundary case: exactly JANELA_DIAS (3) away should be included
+    candidatos = [{"id": "a1", "data": date(2026, 8, 2), "tabela": "fin_contas_pagar"}]
+    resultado = melhor_candidato(date(2026, 8, 5), candidatos, usados=set())
+    # diff = abs((2026-08-02) - (2026-08-05)).days = 3 days, should be included (not > 3)
+    assert resultado is not None
+    assert resultado["id"] == "a1"

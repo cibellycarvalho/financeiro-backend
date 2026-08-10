@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import date, timedelta
 from ofxparse import OfxParser
 
 JANELA_DIAS = 3
@@ -20,7 +20,7 @@ def parse_ofx(file_stream):
     return transacoes
 
 
-def melhor_candidato(data_transacao, candidatos, usados):
+def melhor_candidato(data_transacao: date, candidatos: list[dict], usados: set[tuple[str, str]]) -> dict | None:
     melhor = None
     menor_diff = None
     for c in candidatos:
