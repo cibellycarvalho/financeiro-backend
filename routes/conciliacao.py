@@ -97,3 +97,34 @@ def importar():
         "sem_match": sem_match,
         "novas": novas,
     }), 201
+
+
+@bp.get("/lotes/<lote_id>")
+@require_auth
+def listar_lote(lote_id):
+    transacoes = db.query(
+        "SELECT * FROM fin_extrato_transacoes WHERE lote_id = %s ORDER BY data", (lote_id,)
+    )
+    if not transacoes:
+        return jsonify({"error": "Lote não encontrado"}), 404
+
+    resultado = []
+    for t in transacoes:
+        item = dict(t)
+        row = []
+        if t["match_tabela"] == "fin_contas_pagar":
+            row = db.query("SELECT descricao, valor FROM fin_contas_pagar WHERE id = %s", (t["match_id"],))
+        elif t["match_tabela"] == "fin_pedido_pagamentos":
+            row = db.query(
+                """SELECT pf.nome AS descricao, pp.valor FROM fin_pedido_pagamentos pp
+                   JOIN fin_pedidos_fornecedor pd ON pd.id = pp.pedido_id
+                   JOIN fin_fornecedores pf ON pf.id = pd.fornecedor_id
+                   WHERE pp.id = %s""",
+                (t["match_id"],),
+            )
+        elif t["match_tabela"] == "fin_repasses_ml":
+            row = db.query("SELECT descricao, valor FROM fin_repasses_ml WHERE id = %s", (t["match_id"],))
+        item["match_descricao"] = row[0]["descricao"] if row else None
+        resultado.append(item)
+
+    return jsonify(resultado)

@@ -79,3 +79,29 @@ def test_importar_negado_para_viewer(client, viewer_headers):
         headers=viewer_headers,
     )
     assert resp.status_code == 403
+
+
+def test_listar_lote(client, admin_headers):
+    lote_id = "11111111-0000-0000-0000-000000000001"
+    transacao = {
+        "id": "22222222-0000-0000-0000-000000000001", "lote_id": lote_id,
+        "fitid": "2026080500001", "tipo": "DEBIT", "valor": 450.00,
+        "data": "2026-08-05", "descricao": "Pagamento Fornecedor Flavia",
+        "status": "pendente", "match_tabela": "fin_contas_pagar",
+        "match_id": "33333333-0000-0000-0000-000000000001",
+        "criado_por": None, "criado_em": "2026-08-10T10:00:00+00:00",
+    }
+    match_row = {"descricao": "Conta de luz", "valor": 450.00}
+
+    with patch("routes.conciliacao.db.query", side_effect=[[transacao], [match_row]]):
+        resp = client.get(f"/api/conciliacao/lotes/{lote_id}", headers=admin_headers)
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body[0]["match_descricao"] == "Conta de luz"
+
+
+def test_listar_lote_nao_encontrado(client, admin_headers):
+    with patch("routes.conciliacao.db.query", return_value=[]):
+        resp = client.get("/api/conciliacao/lotes/inexistente", headers=admin_headers)
+    assert resp.status_code == 404
