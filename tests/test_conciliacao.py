@@ -105,3 +105,62 @@ def test_listar_lote_nao_encontrado(client, admin_headers):
     with patch("routes.conciliacao.db.query", return_value=[]):
         resp = client.get("/api/conciliacao/lotes/inexistente", headers=admin_headers)
     assert resp.status_code == 404
+
+
+def test_confirmar_lote_aplica_acoes(client, admin_headers):
+    lote_id = "11111111-0000-0000-0000-000000000001"
+    transacao_match = {
+        "id": "t1", "match_tabela": "fin_contas_pagar", "match_id": "c1",
+        "tipo": "DEBIT", "valor": 450.00, "data": "2026-08-05", "descricao": "Pagamento X",
+    }
+    transacao_nova = {
+        "id": "t2", "match_tabela": None, "match_id": None,
+        "tipo": "DEBIT", "valor": 100.00, "data": "2026-08-06", "descricao": "Compra Y",
+    }
+    transacao_ignorar = {
+        "id": "t3", "match_tabela": None, "match_id": None,
+        "tipo": "CREDIT", "valor": 50.00, "data": "2026-08-07", "descricao": "Depósito Z",
+    }
+    mock_transaction, mock_cur = _mock_transaction_cursor(fetchone_results=[], fetchall_results=[])
+
+    with patch("routes.conciliacao.db.query", return_value=[transacao_match, transacao_nova, transacao_ignorar]), \
+         patch("routes.conciliacao.db.transaction", mock_transaction):
+        resp = client.post(
+            f"/api/conciliacao/lotes/{lote_id}/confirmar",
+            json={"itens": [
+                {"transacao_id": "t1", "acao": "confirmar_match"},
+                {"transacao_id": "t2", "acao": "criar_conta"},
+                {"transacao_id": "t3", "acao": "ignorar"},
+            ]},
+            headers=admin_headers,
+        )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["confirmados"] == 3
+
+
+def test_confirmar_lote_acao_invalida(client, admin_headers):
+    resp = client.post(
+        "/api/conciliacao/lotes/lote1/confirmar",
+        json={"itens": [{"transacao_id": "t1", "acao": "chutar"}]},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 400
+
+
+def test_confirmar_lote_sem_itens(client, admin_headers):
+    resp = client.post(
+        "/api/conciliacao/lotes/lote1/confirmar",
+        json={"itens": []},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 400
+
+
+def test_confirmar_lote_negado_para_viewer(client, viewer_headers):
+    resp = client.post(
+        "/api/conciliacao/lotes/lote1/confirmar",
+        json={"itens": [{"transacao_id": "t1", "acao": "ignorar"}]},
+        headers=viewer_headers,
+    )
+    assert resp.status_code == 403

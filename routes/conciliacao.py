@@ -128,3 +128,56 @@ def listar_lote(lote_id):
         resultado.append(item)
 
     return jsonify(resultado)
+
+
+ACOES_VALIDAS = {"confirmar_match", "ignorar", "criar_conta"}
+
+
+@bp.post("/lotes/<lote_id>/confirmar")
+@require_auth
+@require_admin
+def confirmar_lote(lote_id):
+    data = request.get_json()
+    itens = data.get("itens", [])
+    if not itens:
+        return jsonify({"error": "nenhum item para confirmar"}), 400
+    for item in itens:
+        if item.get("acao") not in ACOES_VALIDAS:
+            return jsonify({"error": f"ação inválida: {item.get('acao')}"}), 400
+
+    transacoes = db.query("SELECT * FROM fin_extrato_transacoes WHERE lote_id = %s", (lote_id,))
+    transacoes_por_id = {str(t["id"]): t for t in transacoes}
+
+    with db.transaction() as cur:
+        for item in itens:
+            transacao = transacoes_por_id.get(item["transacao_id"])
+            if not transacao:
+                continue
+
+            if item["acao"] == "confirmar_match":
+                tabela, alvo_id = transacao["match_tabela"], transacao["match_id"]
+                if not tabela:
+                    continue
+                # `tabela` never comes from client input: it is read from
+                # fin_extrato_transacoes.match_tabela, which is restricted by a DB
+                # CHECK constraint to fin_contas_pagar / fin_pedido_pagamentos /
+                # fin_repasses_ml and is only ever written by importar() in this file.
+                cur.execute(f"UPDATE {tabela} SET ofx_transacao_id = %s WHERE id = %s", (transacao["id"], alvo_id))
+                if tabela == "fin_repasses_ml":
+                    cur.execute("UPDATE fin_repasses_ml SET confirmado = true WHERE id = %s", (alvo_id,))
+                cur.execute("UPDATE fin_extrato_transacoes SET status = 'conciliado' WHERE id = %s", (transacao["id"],))
+
+            elif item["acao"] == "criar_conta":
+                cur.execute(
+                    """INSERT INTO fin_contas_pagar
+                         (descricao, categoria, valor, vencimento, marca, status, origem, ofx_transacao_id)
+                       VALUES (%s, 'OUTRO', %s, %s, 'GERAL', 'a_confirmar', 'ofx', %s)""",
+                    (transacao["descricao"] or "Importado do extrato", transacao["valor"],
+                     transacao["data"], transacao["id"]),
+                )
+                cur.execute("UPDATE fin_extrato_transacoes SET status = 'nova_conta' WHERE id = %s", (transacao["id"],))
+
+            else:
+                cur.execute("UPDATE fin_extrato_transacoes SET status = 'ignorado' WHERE id = %s", (transacao["id"],))
+
+    return jsonify({"confirmados": len(itens)})
