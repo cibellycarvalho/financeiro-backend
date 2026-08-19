@@ -120,9 +120,16 @@ mudança de endereço.
   e tem teste antes de código de tela.
 - **O Painel passa a depender do CRM** para a tela de Lucro Real. Se o CRM cair, a
   tela para de carregar — e precisa dizer isso, em vez de mostrar tela vazia.
-- **Conciliação bancária por OFX** está desenhada em `2026-08-10-conciliacao-bancaria-ofx-design.md`
-  e nunca foi implementada. Não entra nesta migração, mas mexe nas mesmas telas —
-  decidir o destino dela antes de começar evita retrabalho.
+- **Conciliação bancária: adiada, decisão tomada em 19/08.** A spec de OFX
+  (`2026-08-10-conciliacao-bancaria-ofx-design.md`) segue sem implementação. A
+  usuária levantou fazer via **Open Finance** em vez de importar arquivo, e a
+  resposta é que o Pluggy — a tentativa que falhou — já era um agregador de Open
+  Finance: a parede não foi técnica, foi contrato e habilitação (trial expirado,
+  produção nunca solicitada, só sandbox). Fica registrado o argumento que importa
+  para quando o assunto voltar: **o caro é o motor de conciliação** (casar
+  transação com lançamento, tratar o que não casa, revisar antes de gravar), e
+  ele é o mesmo vindo de OFX ou de API. Trocar a fonte depois não custa refazer.
+  Ela optou por **pular o assunto por ora**, e a migração segue sem depender dele.
 
 ## Fora de escopo, registrado para não se perder
 
