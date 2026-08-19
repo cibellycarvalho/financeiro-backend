@@ -702,7 +702,8 @@ zero', que significam coisas opostas no fechamento."
 - [ ] **Step 1: Portar a tela**
 
 Copiar `ml-seller-app/src/pages/Fechamento.jsx` e adaptar:
-- trocar o cliente HTTP pelo `api` do Painel (`financeiro-frontend/src/api.js`);
+- trocar o cliente HTTP pelo `api` do Painel — `import api from '../services/api'`,
+  o mesmo que `ContasPagar.jsx:4` usa;
 - trocar o seletor global de loja do CRM por um `<select>` local, no padrão de
   `RepasesML.jsx:106` — o Painel não tem seletor global, e trazer um seria mudança
   maior que a migração;
