@@ -1,4 +1,4 @@
-"""Fechamento mensal: compras, fretes e montagem.
+"""Fechamento mensal: compras, fretes, montagem e despesas.
 
 Portado do CRM (`ml-seller-api/routes/fechamento.py`) em 19/08/2026, com duas
 diferenças obrigatórias e nenhuma opcional:
@@ -246,3 +246,67 @@ def editar_montagem(id):
 @require_auth
 def excluir_montagem(id):
     return _excluir("fechamento_montagem", id)
+
+
+# ── despesas ─────────────────────────────────────────────────────────────────
+#
+# A rota `despesas-unificadas` do CRM NÃO vem junto de propósito: ela mistura
+# estas despesas com as importadas da Conta Simples, e essa integração fica no
+# CRM. Portada sem ela, devolveria a lista pela metade sem avisar ninguém.
+#
+# O CRM também roda um ALTER TABLE por requisição pra garantir a coluna
+# `categoria` (_ensure_categoria). Aqui isso vira migração
+# (20260819_1500_fechamento_despesas_categoria.sql): comando de alteração de
+# tabela a cada gravação já era demais com um serviço, e agora são dois
+# escrevendo na mesma tabela.
+
+@bp.get("/despesas")
+@require_auth
+def listar_despesas():
+    return _listar("fechamento_despesas")
+
+
+@bp.post("/despesas")
+@require_auth
+def criar_despesa():
+    d = request.get_json(silent=True) or {}
+    if not _mes_ano_valido(d.get("mes_ano", "")):
+        return jsonify({"error": "mes_ano inválido"}), 400
+    conta, erro = _conta_ou_erro()
+    if erro:
+        return erro
+    linha = db.execute(
+        """INSERT INTO fechamento_despesas
+             (conta_ml, mes_ano, data, categoria, descricao, valor, status)
+           VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+        (conta, d["mes_ano"], d.get("data") or None, d.get("categoria") or None,
+         d.get("descricao") or None, d.get("valor") or None,
+         d.get("status") or None),
+    )
+    return jsonify(_serializar(linha)), 201
+
+
+@bp.put("/despesas/<int:id>")
+@require_auth
+def editar_despesa(id):
+    d = request.get_json(silent=True) or {}
+    conta, erro = _conta_ou_erro()
+    if erro:
+        return erro
+    linha = db.execute(
+        """UPDATE fechamento_despesas
+              SET data=%s, categoria=%s, descricao=%s, valor=%s, status=%s
+            WHERE id=%s AND conta_ml=%s RETURNING *""",
+        (d.get("data") or None, d.get("categoria") or None,
+         d.get("descricao") or None, d.get("valor") or None,
+         d.get("status") or None, id, conta),
+    )
+    if not linha:
+        return jsonify({"error": "não encontrado"}), 404
+    return jsonify(_serializar(linha))
+
+
+@bp.delete("/despesas/<int:id>")
+@require_auth
+def excluir_despesa(id):
+    return _excluir("fechamento_despesas", id)

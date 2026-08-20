@@ -103,3 +103,51 @@ def test_cria_montagem(client, admin_headers):
                         headers=admin_headers)
     assert r.status_code == 201
     assert ex.call_args[0][1][2] == "Pedro"
+
+
+# ── despesas ─────────────────────────────────────────────────────────────────
+
+DESPESA = {"id": 7, "conta_ml": "YUSO", "mes_ano": "2026-08", "data": "2026-08-03",
+           "categoria": "Aluguel", "descricao": "Galpão", "valor": 4200.0,
+           "status": "pago"}
+
+
+def test_lista_despesas_do_mes(client, admin_headers):
+    with patch("routes.fechamento.db.query", return_value=[DESPESA]) as q:
+        r = client.get("/api/fechamento/despesas?mes_ano=2026-08", headers=admin_headers)
+    assert r.status_code == 200
+    assert r.get_json()[0]["categoria"] == "Aluguel"
+    assert q.call_args[0][1] == ("YUSO", "2026-08")
+
+
+def test_cria_despesa_com_categoria(client, admin_headers):
+    with patch("routes.fechamento.db.execute", return_value=DESPESA) as ex:
+        r = client.post("/api/fechamento/despesas",
+                        json={"mes_ano": "2026-08", "categoria": "Aluguel",
+                              "descricao": "Galpão", "valor": 4200.0},
+                        headers=admin_headers)
+    assert r.status_code == 201
+    assert ex.call_args[0][1][3] == "Aluguel"
+
+
+def test_viewer_nao_apaga_despesa_de_outra_loja(client, viewer_headers):
+    with patch("routes.fechamento.db.execute", return_value=None) as ex:
+        r = client.delete("/api/fechamento/despesas/7?conta_ml=YUSO", headers=viewer_headers)
+    assert r.status_code == 404
+    assert ex.call_args[0][1] == (7, "M12")
+
+
+def test_viewer_nao_edita_despesa_de_outra_loja(client, viewer_headers):
+    with patch("routes.fechamento.db.execute", return_value=None) as ex:
+        r = client.put("/api/fechamento/despesas/7?conta_ml=YUSO",
+                       json={"valor": 1.0}, headers=viewer_headers)
+    assert r.status_code == 404
+    assert ex.call_args[0][1][-1] == "M12"
+
+
+def test_despesas_unificadas_nao_migra(client, admin_headers):
+    """Fica no CRM: ela junta o fechamento com a Conta Simples, cuja integração
+    não veio. Portada sem isso, devolveria lista pela metade sem avisar."""
+    r = client.get("/api/fechamento/despesas-unificadas?mes_ano=2026-08",
+                   headers=admin_headers)
+    assert r.status_code == 404
