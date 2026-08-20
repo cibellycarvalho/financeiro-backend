@@ -136,3 +136,15 @@ mudança de endereço.
 O Dashboard do CRM continua com os 18 cards. Se um dia a conversa voltar para
 enxugá-lo, o critério está no começo desta spec — mas a usuária já disse que usa
 todos, e essa informação vale mais que a intuição de quem olha de fora.
+
+## Correções de fato, durante a execução (19/08)
+
+**A Conta Simples saiu de uso.** Hoje são Sicredi e Mercado Pago, informado por ela
+enquanto o backend era portado. Isso não bloqueia nada aqui, mas muda o alvo de uma
+eventual conciliação bancária: qualquer trabalho futuro nesse tema é sobre esses dois,
+não sobre a Conta Simples.
+
+**`despesas-unificadas` migra, sim.** Este documento e o plano diziam que ela ficaria
+no CRM porque juntaria duas fontes. Errado: ela lê a mesma tabela e só acrescenta o
+total e a marca de editável — e a tela do Fechamento consome ela, não a `/despesas`.
+Deixá-la para trás quebraria a seção de despesas assim que a tela migrasse.

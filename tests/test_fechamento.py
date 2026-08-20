@@ -145,9 +145,34 @@ def test_viewer_nao_edita_despesa_de_outra_loja(client, viewer_headers):
     assert ex.call_args[0][1][-1] == "M12"
 
 
-def test_despesas_unificadas_nao_migra(client, admin_headers):
-    """Fica no CRM: ela junta o fechamento com a Conta Simples, cuja integração
-    não veio. Portada sem isso, devolveria lista pela metade sem avisar."""
-    r = client.get("/api/fechamento/despesas-unificadas?mes_ano=2026-08",
+def test_despesas_unificadas_devolve_lista_e_total(client, admin_headers):
+    """Migra sim. Eu tinha decidido deixá-la no CRM achando que ela juntava
+    fontes diferentes — lendo o original, ela lê a MESMA tabela e só acrescenta
+    o total e a marca de editável. E a tela usa essa rota."""
+    with patch("routes.fechamento.db.query", return_value=[DESPESA]):
+        r = client.get("/api/fechamento/despesas-unificadas?competencia=2026-08",
+                       headers=admin_headers)
+    assert r.status_code == 200
+    corpo = r.get_json()
+    assert corpo["total"] == 4200.0
+    assert corpo["despesas"][0]["descricao"] == "Galpão"
+
+
+def test_despesa_importada_do_banco_nao_e_editavel(client, admin_headers):
+    """Linhas que vieram de sincronização bancária carregam ext_id. A Conta
+    Simples saiu de uso (só Sicredi e Mercado Pago agora), mas as linhas antigas
+    continuam no banco e continuam sendo registro bancário, não lançamento
+    manual."""
+    importada = {**DESPESA, "ext_id": "cs-99"}
+    with patch("routes.fechamento.db.query", return_value=[importada, DESPESA]):
+        r = client.get("/api/fechamento/despesas-unificadas?competencia=2026-08",
+                       headers=admin_headers)
+    despesas = r.get_json()["despesas"]
+    assert despesas[0]["editavel"] is False
+    assert despesas[1]["editavel"] is True
+
+
+def test_competencia_invalida_recusa(client, admin_headers):
+    r = client.get("/api/fechamento/despesas-unificadas?competencia=agosto",
                    headers=admin_headers)
-    assert r.status_code == 404
+    assert r.status_code == 400

@@ -250,9 +250,11 @@ def excluir_montagem(id):
 
 # ── despesas ─────────────────────────────────────────────────────────────────
 #
-# A rota `despesas-unificadas` do CRM NÃO vem junto de propósito: ela mistura
-# estas despesas com as importadas da Conta Simples, e essa integração fica no
-# CRM. Portada sem ela, devolveria a lista pela metade sem avisar ninguém.
+# CORREÇÃO (19/08): eu tinha deixado `despesas-unificadas` fora, achando que ela
+# juntava estas despesas com as importadas da Conta Simples. Lendo o original,
+# ela lê a MESMA tabela — as importadas sempre estiveram nela — e só acrescenta o
+# total e a marca de editável. E a tela do Fechamento consome ESSA rota. Ela está
+# portada no fim deste arquivo.
 #
 # O CRM também roda um ALTER TABLE por requisição pra garantir a coluna
 # `categoria` (_ensure_categoria). Aqui isso vira migração
@@ -310,3 +312,41 @@ def editar_despesa(id):
 @require_auth
 def excluir_despesa(id):
     return _excluir("fechamento_despesas", id)
+
+
+@bp.get("/despesas-unificadas")
+@require_auth
+def despesas_unificadas():
+    """Despesas do mês com o total e a marca de editável.
+
+    O nome "unificadas" é herança de quando a tela juntava lançamento manual com
+    importação bancária. Lê UMA tabela — as linhas importadas sempre estiveram
+    nela. A tela do Fechamento consome esta rota (não a `/despesas`), então ela
+    precisa existir aqui para a tela funcionar depois de migrada.
+
+    `editavel = false` para linha com `ext_id`: veio de sincronização bancária e
+    é registro do banco, não lançamento à mão. A Conta Simples saiu de uso
+    (hoje são Sicredi e Mercado Pago), mas as linhas antigas continuam lá e
+    continuam sendo registro bancário.
+
+    O parâmetro é `competencia`, não `mes_ano` — nome que veio do CRM e que a
+    tela já manda assim.
+    """
+    competencia = request.args.get("competencia", "")
+    if not _mes_ano_valido(competencia):
+        return jsonify({"error": "competencia inválida (esperado AAAA-MM)"}), 400
+    conta, erro = _conta_ou_erro()
+    if erro:
+        return erro
+
+    linhas = db.query(
+        "SELECT * FROM fechamento_despesas WHERE conta_ml=%s AND mes_ano=%s ORDER BY id",
+        (conta, competencia),
+    )
+    despesas = [
+        {**_serializar(l), "origem": "fechamento_despesas",
+         "editavel": not l.get("ext_id")}
+        for l in linhas
+    ]
+    total = sum(float(d["valor"] or 0) for d in despesas)
+    return jsonify({"despesas": despesas, "total": round(total, 2)})
