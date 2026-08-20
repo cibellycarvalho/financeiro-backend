@@ -148,3 +148,15 @@ não sobre a Conta Simples.
 no CRM porque juntaria duas fontes. Errado: ela lê a mesma tabela e só acrescenta o
 total e a marca de editável — e a tela do Fechamento consome ela, não a `/despesas`.
 Deixá-la para trás quebraria a seção de despesas assim que a tela migrasse.
+
+**O estoque mensal fica no CRM; só o galpão migra.** Descoberto ao portar: o
+`POST /api/fechamento/estoque` captura Full e FBM direto da API do Mercado Livre
+(`routes/inventario.fetch_inventario`) — é integração com o ML, e vale para ele a
+mesma regra do Lucro Real. Mover só a leitura deixaria ler e gravar o mesmo dado em
+serviços diferentes, que divergem com o tempo. A contagem do galpão não tem nada de
+ML: é um número contado e digitado, chaveado por dono da conta e mês, e migrou.
+
+Duas afirmações erradas do plano, corrigidas na execução: `galpao_registrado` **não é
+coluna** — é derivado de existir linha ou não, e essa derivação vive no estoque, que
+ficou no CRM. E a tabela do galpão **não tem** `conta_ml`, então a contagem não passa
+pela trava de loja: não há loja envolvida.
