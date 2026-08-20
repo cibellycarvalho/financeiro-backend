@@ -14,8 +14,8 @@ import pytest
 from unittest.mock import patch
 from app import create_app
 
-ADMIN_USER = {"user_id": "fd3a3d59-727f-40e2-bbea-c91187d2f0a7", "email": "cibellypeitl63@gmail.com", "fin_role": "fin_admin"}
-VIEWER_USER = {"user_id": "aaaabbbb-0000-0000-0000-000000000001", "email": "socio@test.com", "fin_role": "fin_viewer"}
+ADMIN_USER = {"user_id": "fd3a3d59-727f-40e2-bbea-c91187d2f0a7", "email": "cibellypeitl63@gmail.com", "fin_role": "fin_admin", "conta_ml": "YUSO", "is_admin": True}
+VIEWER_USER = {"user_id": "aaaabbbb-0000-0000-0000-000000000001", "email": "socio@test.com", "fin_role": "fin_viewer", "conta_ml": "M12", "is_admin": False}
 
 @pytest.fixture
 def app():

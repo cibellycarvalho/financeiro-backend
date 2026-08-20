@@ -427,10 +427,16 @@ def excluir_compra(id):
     return jsonify({"ok": True})
 ```
 
-**Fretes** repetem exatamente essa estrutura sobre
-`fechamento_fretes (data, motorista, coleta_sp, frete_full, total, status)`, com
-`total = coleta_sp + frete_full` calculado no servidor — o CRM calcula lá, e deixar o
-cliente mandar o total abriria espaço para divergência entre o que aparece e o que soma.
+**Fretes** repetem essa estrutura sobre
+`fechamento_fretes (data, motorista, coleta_sp, frete_full, total, status)`.
+
+**CORREÇÃO (19/08, na execução):** este plano dizia calcular `total` no servidor como
+`coleta_sp + frete_full`. Está errado por dois motivos, vistos ao ler o original:
+`coleta_sp` é um BOOLEANO (sim/não), não um valor — somá-lo com dinheiro não tem
+sentido; e o CRM **não calcula** nem esse total nem o `valor_total` das compras,
+aceita o que a tela manda. Portar calculando mudaria comportamento no meio de uma
+migração de endereço. Fica portado fiel; a observação de que um total vindo do
+cliente pode divergir da soma das partes vira trabalho próprio.
 
 **Montagem** repete sobre `fechamento_montagem (montador, valor, data)`, sem cálculo
 derivado.

@@ -14,6 +14,7 @@ def create_app():
     from routes.dashboard import bp as dashboard_bp
     from routes.usuarios import bp as usuarios_bp
     from routes.pluggy import bp as pluggy_bp
+    from routes.fechamento import bp as fechamento_bp
 
     app.register_blueprint(contas_bp, url_prefix="/api/contas")
     app.register_blueprint(repasses_bp, url_prefix="/api/repasses")
@@ -21,6 +22,7 @@ def create_app():
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
     app.register_blueprint(usuarios_bp, url_prefix="/api/usuarios")
     app.register_blueprint(pluggy_bp, url_prefix="/api/pluggy")
+    app.register_blueprint(fechamento_bp, url_prefix="/api/fechamento")
 
     @app.get("/health")
     def health():
