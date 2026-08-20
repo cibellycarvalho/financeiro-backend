@@ -27,7 +27,17 @@ def verify_jwt(token: str) -> dict:
         "SELECT role FROM fin_user_roles WHERE user_id = %s", (user_id,)
     )
     fin_role = rows[0]["role"] if rows else None
-    return {"user_id": user_id, "email": email, "fin_role": fin_role}
+    # conta_ml e admin vêm dos metadados do Supabase — MESMA fonte que o CRM usa.
+    # Uma fonte só de verdade: mudar o acesso de alguém num lugar vale nos dois
+    # sistemas, em vez de duas listas que divergem com o tempo.
+    metadata = payload.get("user_metadata") or {}
+    return {
+        "user_id": user_id,
+        "email": email,
+        "fin_role": fin_role,
+        "conta_ml": metadata.get("conta_ml"),
+        "is_admin": metadata.get("role") == "admin",
+    }
 
 
 def require_auth(f):
