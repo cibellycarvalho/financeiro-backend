@@ -61,6 +61,14 @@ def dashboard():
             "cobranças_ml_mes": cobranças,
             "saldo_disponivel": repasses_bruto - cobranças - total_pago - total_pendente - total_fornecedores,
             "fornecedores_aberto": total_fornecedores,
+            # As duas parcelas abaixo ja eram calculadas aqui e ficavam so na
+            # subtracao. A tela agora escreve a conta embaixo do saldo — sem
+            # elas, o numero aparece do nada e a pessoa nao tem como discordar
+            # dele. Custam zero: sao as mesmas somas de sempre.
+            "contas_pagas_mes": total_pago,
+            "contas_pendentes_mes": total_pendente,
+            "n_contas_semana": len(contas_semana),
+            "n_fornecedores_aberto": len(fornecedores_aberto),
         },
         "alertas": {
             "repasse_divergencia": False,
