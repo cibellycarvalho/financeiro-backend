@@ -14,3 +14,7 @@ ALLOWED_ORIGINS = os.environ.get(
 
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
 
+# Leitura de documentos por IA (upload do pedido de compra). Sem chave, os
+# endpoints /ler respondem 503 e o resto do sistema segue igual.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+LEITURA_MODEL = os.environ.get("LEITURA_MODEL", "claude-opus-5")
