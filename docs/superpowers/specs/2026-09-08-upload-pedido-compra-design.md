@@ -139,15 +139,19 @@ mais de 24 h são apagados **no início da próxima chamada a `/ler`** — sem c
 sem job; o custo é uma listagem por leitura. Isso evita subir o arquivo duas vezes
 e evita gravar anexo de pedido que ela cancelou.
 
-No banco fica `arquivo_path` (caminho no bucket). A API devolve `arquivo_url`
-(URL assinada, gerada na hora). A tela só conhece a URL.
+No banco fica `arquivo_path` (caminho no bucket). A URL assinada só é gerada
+pelo endpoint `/anexo`, no clique.
 
 ### Endpoints existentes, campos novos
 
 - `POST /pedidos` ganha `numero_pedido` (opcional) e `arquivo_token` (opcional).
 - `POST /pagamentos` ganha `id_transacao` (opcional) e `arquivo_token` (opcional).
 - `GET /pedidos` e `GET /pagamentos` passam a devolver `numero_pedido`,
-  `id_transacao`, `arquivo_url`.
+  `id_transacao`, `arquivo_path` (a tela só usa para saber se mostra o 📎).
+- `GET /pedidos/<pedido_id>/anexo` e `GET /pagamentos/<pagamento_id>/anexo`
+  devolvem `{"url": "<URL assinada, 1 h>"}`. A tela chama **no clique** do 📎 e
+  abre em nova aba — assinar cada anexo em toda listagem custaria uma chamada
+  ao Storage por linha.
 
 ### Módulo `leitura_documento.py` (novo)
 
@@ -172,8 +176,11 @@ se pergunta ao modelo):
 ### Sugestão de fornecedor
 
 Tabela nova `fin_fornecedor_aliases` (`fornecedor_id`, `alias TEXT`,
-`origem TEXT CHECK (origem IN ('vendedor','destinatario'))`). Match por
-`lower(unaccent(alias)) = lower(unaccent(texto))`. Semeada na migração com o que
+`alias_norm TEXT`, `origem TEXT CHECK (origem IN ('vendedor','destinatario'))`).
+`alias_norm` é o alias em minúsculas, sem acento e com espaços colapsados,
+calculado **em Python** (`unicodedata`) — não com `unaccent()` do Postgres, que
+não é imutável e por isso não entra em índice único. Match por
+`alias_norm = normalizar(texto)`. Semeada na migração com o que
 já se sabe: Flavia ← `Flavia` (vendedor), `Multivale Montagem E Estruturas Ltda`
 e `MIAO Atacadista e Representacoes Ltda` (destinatário). **Aprende sozinha**: ao
 salvar com um fornecedor diferente da sugestão (ou sem sugestão), o vendedor /
@@ -204,17 +211,19 @@ ALTER TABLE fin_pagamentos_fornecedor
 CREATE UNIQUE INDEX idx_pagamentos_fornecedor_id_transacao
   ON fin_pagamentos_fornecedor(id_transacao) WHERE id_transacao IS NOT NULL;
 
-CREATE EXTENSION IF NOT EXISTS unaccent;
 CREATE TABLE fin_fornecedor_aliases (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   fornecedor_id UUID NOT NULL REFERENCES fin_fornecedores(id) ON DELETE CASCADE,
   alias TEXT NOT NULL,
+  alias_norm TEXT NOT NULL,
   origem TEXT NOT NULL CHECK (origem IN ('vendedor', 'destinatario')),
   created_at TIMESTAMPTZ DEFAULT now()
 );
-CREATE UNIQUE INDEX idx_fornecedor_aliases_alias
-  ON fin_fornecedor_aliases(origem, lower(unaccent(alias)));
+CREATE UNIQUE INDEX idx_fornecedor_aliases_norm
+  ON fin_fornecedor_aliases(origem, alias_norm);
 ALTER TABLE fin_fornecedor_aliases ENABLE ROW LEVEL SECURITY;
+
+INSERT INTO storage.buckets (id, name, public) VALUES ('fornecedores', 'fornecedores', false);
 ```
 
 Um alias pertence a um fornecedor só (índice único por origem + texto
