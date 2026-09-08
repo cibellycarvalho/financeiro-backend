@@ -1,3 +1,5 @@
+import re
+
 from flask import Blueprint, request, jsonify, g
 import db
 import aliases
@@ -149,7 +151,19 @@ def _subir_pendente(dados, mime):
     return storage.enviar_pendente(dados, mime)
 
 
+# Tokens legítimos sempre vêm de storage.enviar_pendente (uuid4().hex + ext
+# aceita). Qualquer outra forma é entrada forjada — sem isso, um token como
+# "outro-fornecedor/pedidos/x.pdf" moveria o anexo de outro registro.
+_RE_ARQUIVO_TOKEN = re.compile(r"^pendentes/[0-9a-f]{32}\.(pdf|jpg|png)$")
+
+
+def _arquivo_token_valido(token):
+    return bool(token) and _RE_ARQUIVO_TOKEN.match(token) is not None
+
+
 def _destino_anexo(fornecedor_id, pasta, registro_id, arquivo_token):
+    if not _arquivo_token_valido(arquivo_token):
+        raise ValueError("arquivo_token inválido")
     ext = arquivo_token.rsplit(".", 1)[-1]
     return f"{fornecedor_id}/{pasta}/{registro_id}.{ext}"
 
@@ -246,6 +260,9 @@ def criar_pedido(fornecedor_id):
     numero_pedido = (data.get("numero_pedido") or "").strip() or None
     arquivo_token = (data.get("arquivo_token") or "").strip() or None
     alias_vendedor = data.get("alias_vendedor")
+
+    if arquivo_token and not _arquivo_token_valido(arquivo_token):
+        return jsonify({"error": "arquivo_token inválido"}), 400
 
     try:
         with db.transaction() as cur:

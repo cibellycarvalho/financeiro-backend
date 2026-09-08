@@ -193,6 +193,7 @@ def _transacao_fake(mocker, retornos):
 
 PEDIDO_NOVO = {"id": "p-9", "fornecedor_id": FORN, "data_pedido": "2026-09-01", "valor_total": 20.0}
 ITEM_NOVO = {"id": "i-1", "pedido_id": "p-9", "produto": "CABO HDMI", "quantidade": 2, "valor_unitario": 10.0}
+TOKEN = "pendentes/" + "0" * 32 + ".pdf"
 
 
 # --- POST /pedidos com campos novos ----------------------------------------
@@ -206,7 +207,7 @@ def test_criar_pedido_grava_numero_move_anexo_e_aprende_alias(client, admin_head
         "data_pedido": "2026-09-01",
         "itens": [{"produto": "CABO HDMI", "quantidade": 2, "valor_unitario": 10}],
         "numero_pedido": "2026/9001",
-        "arquivo_token": "pendentes/abc.pdf",
+        "arquivo_token": TOKEN,
         "alias_vendedor": "Flavia",
     }, headers=admin_headers)
     assert r.status_code == 201
@@ -215,7 +216,7 @@ def test_criar_pedido_grava_numero_move_anexo_e_aprende_alias(client, admin_head
     assert "numero_pedido" in insert_sql
     assert "2026/9001" in insert_params
 
-    mover.assert_called_once_with("pendentes/abc.pdf", f"{FORN}/pedidos/p-9.pdf")
+    mover.assert_called_once_with(TOKEN, f"{FORN}/pedidos/p-9.pdf")
     update_sql, update_params = cur.execute.call_args_list[-1].args
     assert "arquivo_path" in update_sql
     assert update_params == (f"{FORN}/pedidos/p-9.pdf", "p-9")
@@ -244,8 +245,31 @@ def test_criar_pedido_storage_falhou_nao_grava(client, admin_headers, mocker):
     r = client.post(f"/api/fornecedores/{FORN}/pedidos", json={
         "data_pedido": "2026-09-01",
         "itens": [{"produto": "CABO HDMI", "quantidade": 2, "valor_unitario": 10}],
-        "arquivo_token": "pendentes/abc.pdf",
+        "arquivo_token": TOKEN,
     }, headers=admin_headers)
     assert r.status_code == 500
     assert "anexo" in r.get_json()["error"].lower()
     aprender.assert_not_called()
+
+
+def test_criar_pedido_arquivo_token_forjado_400(client, admin_headers, mocker):
+    transacao = mocker.patch("routes.fornecedores.db.transaction")
+    mover = mocker.patch("routes.fornecedores.storage.mover")
+    r = client.post(f"/api/fornecedores/{FORN}/pedidos", json={
+        "data_pedido": "2026-09-01",
+        "itens": [{"produto": "CABO HDMI", "quantidade": 2, "valor_unitario": 10}],
+        "arquivo_token": f"{OUTRO}/pagamentos/abc.pdf",
+    }, headers=admin_headers)
+    assert r.status_code == 400
+    assert "arquivo_token" in r.get_json()["error"]
+    transacao.assert_not_called()
+    mover.assert_not_called()
+
+
+def test_destino_anexo_rejeita_token_fora_de_pendentes():
+    from routes.fornecedores import _destino_anexo
+    with pytest.raises(ValueError):
+        _destino_anexo(FORN, "pedidos", "p-9", "pendentes/../outro.pdf")
+    with pytest.raises(ValueError):
+        _destino_anexo(FORN, "pedidos", "p-9", "pendentes/abc.pdf")  # hex curto demais
+    assert _destino_anexo(FORN, "pedidos", "p-9", "pendentes/" + "a" * 32 + ".png") == f"{FORN}/pedidos/p-9.png"
