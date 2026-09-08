@@ -457,6 +457,55 @@ def listar_pagamentos(fornecedor_id):
     return jsonify(rows)
 
 
+@bp.post("/<fornecedor_id>/pagamentos/ler")
+@require_auth
+@require_admin
+def ler_comprovante_arquivo(fornecedor_id):
+    dados, mime, erro = _ler_arquivo_enviado()
+    if erro:
+        return erro
+
+    try:
+        lido = leitura_documento.ler_comprovante(dados, mime)
+    except leitura_documento.LeituraIndisponivel:
+        return jsonify({"error": MSG_LEITURA_INDISPONIVEL}), 503
+    except leitura_documento.LeituraFalhou:
+        lido = None
+
+    try:
+        token = _subir_pendente(dados, mime)
+    except storage.StorageErro:
+        return jsonify({"error": "Não consegui guardar o arquivo. Tente de novo."}), 500
+
+    if lido is None:
+        return jsonify({
+            "leitura_falhou": True, "arquivo_token": token,
+            "valor": None, "data_pagamento": None, "destinatario": None,
+            "id_transacao": None, "fornecedor_sugerido_id": None, "pagamento_existente": None,
+        })
+
+    existente = None
+    if lido["id_transacao"]:
+        rows = db.query(
+            "SELECT id, data_pagamento, valor FROM fin_pagamentos_fornecedor WHERE id_transacao = %s",
+            (lido["id_transacao"],),
+        )
+        if rows:
+            existente = {"id": rows[0]["id"], "data_pagamento": rows[0]["data_pagamento"],
+                         "valor": float(rows[0]["valor"])}
+
+    return jsonify({
+        "leitura_falhou": False,
+        "arquivo_token": token,
+        "valor": lido["valor"],
+        "data_pagamento": lido["data_pagamento"],
+        "destinatario": lido["destinatario"],
+        "id_transacao": lido["id_transacao"],
+        "fornecedor_sugerido_id": aliases.sugerir_fornecedor(lido["destinatario"], "destinatario"),
+        "pagamento_existente": existente,
+    })
+
+
 @bp.post("/<fornecedor_id>/pagamentos")
 @require_auth
 @require_admin

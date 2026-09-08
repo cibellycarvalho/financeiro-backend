@@ -118,3 +118,59 @@ def test_ler_pedido_storage_falhou_no_envio_500_com_mensagem(client, admin_heade
                     headers=admin_headers, content_type="multipart/form-data")
     assert r.status_code == 500
     assert "arquivo" in r.get_json()["error"].lower()
+
+
+LIDO_COMPROVANTE = {
+    "valor": 30000.0,
+    "data_pagamento": "2026-08-24",
+    "destinatario": "MIAO ATACADISTA E REPRESENTACOES LTDA",
+    "id_transacao": "E8109949120260824004025qquKDYh56",
+}
+
+
+# --- POST /pagamentos/ler ---------------------------------------------------
+
+def test_ler_comprovante_devolve_rascunho(client, admin_headers, mocker):
+    mocker.patch("routes.fornecedores.leitura_documento.ler_comprovante", return_value=LIDO_COMPROVANTE)
+    mocker.patch("routes.fornecedores.aliases.sugerir_fornecedor", return_value=FORN)
+    mocker.patch("routes.fornecedores.db.query", return_value=[])
+
+    r = client.post(f"/api/fornecedores/{FORN}/pagamentos/ler", data=_arquivo("pix.png", "image/png", b"\x89PNG"),
+                    headers=admin_headers, content_type="multipart/form-data")
+    assert r.status_code == 200
+    corpo = r.get_json()
+    assert corpo["leitura_falhou"] is False
+    assert corpo["valor"] == 30000.0
+    assert corpo["data_pagamento"] == "2026-08-24"
+    assert corpo["destinatario"] == LIDO_COMPROVANTE["destinatario"]
+    assert corpo["id_transacao"] == LIDO_COMPROVANTE["id_transacao"]
+    assert corpo["fornecedor_sugerido_id"] == FORN
+    assert corpo["pagamento_existente"] is None
+    assert corpo["arquivo_token"] == "pendentes/abc.pdf"
+
+
+def test_ler_comprovante_avisa_e2e_ja_lancado(client, admin_headers, mocker):
+    mocker.patch("routes.fornecedores.leitura_documento.ler_comprovante", return_value=LIDO_COMPROVANTE)
+    mocker.patch("routes.fornecedores.aliases.sugerir_fornecedor", return_value=None)
+    query = mocker.patch("routes.fornecedores.db.query",
+                         return_value=[{"id": "pg-1", "data_pagamento": "2026-08-24", "valor": 30000.0}])
+    r = client.post(f"/api/fornecedores/{FORN}/pagamentos/ler", data=_arquivo(),
+                    headers=admin_headers, content_type="multipart/form-data")
+    assert r.get_json()["pagamento_existente"] == {"id": "pg-1", "data_pagamento": "2026-08-24", "valor": 30000.0}
+    assert query.call_args.args[1] == (LIDO_COMPROVANTE["id_transacao"],)
+
+
+def test_ler_comprovante_leitura_falhou_devolve_token(client, admin_headers, mocker):
+    mocker.patch("routes.fornecedores.leitura_documento.ler_comprovante", side_effect=ld.LeituraFalhou("x"))
+    r = client.post(f"/api/fornecedores/{FORN}/pagamentos/ler", data=_arquivo(),
+                    headers=admin_headers, content_type="multipart/form-data")
+    assert r.status_code == 200
+    assert r.get_json()["leitura_falhou"] is True
+    assert r.get_json()["arquivo_token"] == "pendentes/abc.pdf"
+
+
+def test_ler_comprovante_api_indisponivel_503(client, admin_headers, mocker):
+    mocker.patch("routes.fornecedores.leitura_documento.ler_comprovante", side_effect=ld.LeituraIndisponivel("x"))
+    r = client.post(f"/api/fornecedores/{FORN}/pagamentos/ler", data=_arquivo(),
+                    headers=admin_headers, content_type="multipart/form-data")
+    assert r.status_code == 503
