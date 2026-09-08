@@ -334,6 +334,23 @@ def test_registrar_pagamento_sem_campos_novos_continua_igual(client, admin_heade
     mover.assert_not_called()
 
 
+def test_registrar_pagamento_anexo_falhou_ainda_aprende_alias(client, admin_headers, mocker):
+    _saldo(mocker, 100000.0)
+    mocker.patch("routes.fornecedores.db.query", side_effect=[[{"id": FORN}], []])
+    mocker.patch("routes.fornecedores.db.execute", return_value=dict(PAGAMENTO_NOVO))
+    mocker.patch("routes.fornecedores.storage.mover", side_effect=storage.StorageErro("x"))
+    aprender = mocker.patch("routes.fornecedores.aliases.aprender_alias")
+    r = client.post(f"/api/fornecedores/{FORN}/pagamentos", json={
+        "valor": 30000, "data_pagamento": "2026-08-24",
+        "id_transacao": "E8109949120260824004025qquKDYh56",
+        "arquivo_token": TOKEN,
+        "alias_destinatario": "MIAO ATACADISTA E REPRESENTACOES LTDA",
+    }, headers=admin_headers)
+    assert r.status_code == 201
+    assert "aviso" in r.get_json()
+    aprender.assert_called_once_with(FORN, "MIAO ATACADISTA E REPRESENTACOES LTDA", "destinatario")
+
+
 def test_registrar_pagamento_arquivo_token_forjado_400(client, admin_headers, mocker):
     _saldo(mocker, 100000.0)
     query = mocker.patch("routes.fornecedores.db.query", return_value=[{"id": FORN}])

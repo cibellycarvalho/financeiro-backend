@@ -597,6 +597,10 @@ def registrar_pagamento(fornecedor_id):
         (fornecedor_id, valor, data["data_pagamento"], id_transacao, g.user["user_id"])
     )
 
+    # O pagamento já está gravado: o alias vale mesmo que o anexo falhe abaixo.
+    if alias_destinatario:
+        aliases.aprender_alias(fornecedor_id, alias_destinatario, "destinatario")
+
     if arquivo_token:
         destino = _destino_anexo(fornecedor_id, "pagamentos", row["id"], arquivo_token)
         try:
@@ -611,9 +615,6 @@ def registrar_pagamento(fornecedor_id):
             "UPDATE fin_pagamentos_fornecedor SET arquivo_path = %s WHERE id = %s RETURNING *",
             (destino, row["id"])
         )
-
-    if alias_destinatario:
-        aliases.aprender_alias(fornecedor_id, alias_destinatario, "destinatario")
 
     return jsonify(row), 201
 
