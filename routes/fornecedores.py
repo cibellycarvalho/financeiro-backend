@@ -570,12 +570,51 @@ def registrar_pagamento(fornecedor_id):
     if valor > saldo_aberto:
         return jsonify({"error": f"Valor maior que o saldo em aberto (R$ {saldo_aberto:.2f})"}), 400
 
+    id_transacao = (data.get("id_transacao") or "").strip() or None
+    arquivo_token = (data.get("arquivo_token") or "").strip() or None
+    alias_destinatario = data.get("alias_destinatario")
+
+    if arquivo_token and not _arquivo_token_valido(arquivo_token):
+        return jsonify({"error": "arquivo_token inválido"}), 400
+
+    # Checagem antes do INSERT para responder 409 com mensagem; o índice único
+    # parcial no banco segue como garantia final.
+    if id_transacao:
+        repetidos = db.query(
+            "SELECT id, data_pagamento, valor FROM fin_pagamentos_fornecedor WHERE id_transacao = %s",
+            (id_transacao,)
+        )
+        if repetidos:
+            quando = repetidos[0]["data_pagamento"]
+            quando = quando.strftime("%d/%m/%Y") if hasattr(quando, "strftime") else quando
+            return jsonify({"error": f"Esse comprovante já foi lançado em {quando} "
+                                     f"(R$ {float(repetidos[0]['valor']):.2f})"}), 409
+
     row = db.execute(
-        """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, criado_por)
-           VALUES (%s, %s, %s, %s)
+        """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, id_transacao, criado_por)
+           VALUES (%s, %s, %s, %s, %s)
            RETURNING *""",
-        (fornecedor_id, valor, data["data_pagamento"], g.user["user_id"])
+        (fornecedor_id, valor, data["data_pagamento"], id_transacao, g.user["user_id"])
     )
+
+    if arquivo_token:
+        destino = _destino_anexo(fornecedor_id, "pagamentos", row["id"], arquivo_token)
+        try:
+            storage.mover(arquivo_token, destino)
+        except storage.StorageErro:
+            # O pagamento já está gravado (é db.execute, não transação): não
+            # desfazer — ela vê o pagamento sem clipe e pode subir de novo depois.
+            row["arquivo_path"] = None
+            row["aviso"] = "Pagamento salvo, mas o anexo não pôde ser guardado."
+            return jsonify(row), 201
+        row = db.execute(
+            "UPDATE fin_pagamentos_fornecedor SET arquivo_path = %s WHERE id = %s RETURNING *",
+            (destino, row["id"])
+        )
+
+    if alias_destinatario:
+        aliases.aprender_alias(fornecedor_id, alias_destinatario, "destinatario")
+
     return jsonify(row), 201
 
 
@@ -630,3 +669,28 @@ def excluir_pagamento(fornecedor_id, pagamento_id):
         (pagamento_id, fornecedor_id)
     )
     return "", 204
+
+
+def _url_anexo(tabela, registro_id, fornecedor_id):
+    rows = db.query(
+        f"SELECT arquivo_path FROM {tabela} WHERE id = %s AND fornecedor_id = %s",
+        (registro_id, fornecedor_id)
+    )
+    if not rows or not rows[0]["arquivo_path"]:
+        return jsonify({"error": "Sem anexo"}), 404
+    try:
+        return jsonify({"url": storage.url_assinada(rows[0]["arquivo_path"])})
+    except storage.StorageErro:
+        return jsonify({"error": "Não consegui abrir o anexo agora. Tente de novo."}), 500
+
+
+@bp.get("/<fornecedor_id>/pedidos/<pedido_id>/anexo")
+@require_auth
+def anexo_pedido(fornecedor_id, pedido_id):
+    return _url_anexo("fin_pedidos_fornecedor", pedido_id, fornecedor_id)
+
+
+@bp.get("/<fornecedor_id>/pagamentos/<pagamento_id>/anexo")
+@require_auth
+def anexo_pagamento(fornecedor_id, pagamento_id):
+    return _url_anexo("fin_pagamentos_fornecedor", pagamento_id, fornecedor_id)

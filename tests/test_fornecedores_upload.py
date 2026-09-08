@@ -273,3 +273,109 @@ def test_destino_anexo_rejeita_token_fora_de_pendentes():
     with pytest.raises(ValueError):
         _destino_anexo(FORN, "pedidos", "p-9", "pendentes/abc.pdf")  # hex curto demais
     assert _destino_anexo(FORN, "pedidos", "p-9", "pendentes/" + "a" * 32 + ".png") == f"{FORN}/pedidos/p-9.png"
+
+
+# --- POST /pagamentos com campos novos -------------------------------------
+
+PAGAMENTO_NOVO = {"id": "pg-9", "fornecedor_id": FORN, "valor": 30000.0, "data_pagamento": "2026-08-24"}
+
+
+def _saldo(mocker, valor):
+    mocker.patch("routes.fornecedores._saldo_aberto_fornecedor", return_value=valor)
+
+
+def test_registrar_pagamento_grava_e2e_move_anexo_e_aprende_alias(client, admin_headers, mocker):
+    _saldo(mocker, 100000.0)
+    query = mocker.patch("routes.fornecedores.db.query")
+    # 1ª: fornecedor existe; 2ª: nenhum pagamento com esse E2E
+    query.side_effect = [[{"id": FORN}], []]
+    execute = mocker.patch("routes.fornecedores.db.execute")
+    execute.side_effect = [dict(PAGAMENTO_NOVO), {**PAGAMENTO_NOVO, "arquivo_path": f"{FORN}/pagamentos/pg-9.pdf"}]
+    mover = mocker.patch("routes.fornecedores.storage.mover")
+    aprender = mocker.patch("routes.fornecedores.aliases.aprender_alias")
+
+    r = client.post(f"/api/fornecedores/{FORN}/pagamentos", json={
+        "valor": 30000, "data_pagamento": "2026-08-24",
+        "id_transacao": "E8109949120260824004025qquKDYh56",
+        "arquivo_token": TOKEN,
+        "alias_destinatario": "MIAO ATACADISTA E REPRESENTACOES LTDA",
+    }, headers=admin_headers)
+    assert r.status_code == 201
+    insert_sql, insert_params = execute.call_args_list[0].args
+    assert "id_transacao" in insert_sql
+    assert "E8109949120260824004025qquKDYh56" in insert_params
+    mover.assert_called_once_with(TOKEN, f"{FORN}/pagamentos/pg-9.pdf")
+    aprender.assert_called_once_with(FORN, "MIAO ATACADISTA E REPRESENTACOES LTDA", "destinatario")
+    assert r.get_json()["arquivo_path"] == f"{FORN}/pagamentos/pg-9.pdf"
+
+
+def test_registrar_pagamento_e2e_repetido_409(client, admin_headers, mocker):
+    _saldo(mocker, 100000.0)
+    query = mocker.patch("routes.fornecedores.db.query")
+    query.side_effect = [[{"id": FORN}], [{"id": "pg-1", "data_pagamento": "2026-08-24", "valor": 30000.0}]]
+    execute = mocker.patch("routes.fornecedores.db.execute")
+    r = client.post(f"/api/fornecedores/{FORN}/pagamentos", json={
+        "valor": 30000, "data_pagamento": "2026-08-24",
+        "id_transacao": "E8109949120260824004025qquKDYh56",
+    }, headers=admin_headers)
+    assert r.status_code == 409
+    assert "já foi lançado" in r.get_json()["error"]
+    execute.assert_not_called()
+
+
+def test_registrar_pagamento_sem_campos_novos_continua_igual(client, admin_headers, mocker):
+    _saldo(mocker, 100000.0)
+    mocker.patch("routes.fornecedores.db.query", return_value=[{"id": FORN}])
+    mocker.patch("routes.fornecedores.db.execute", return_value=dict(PAGAMENTO_NOVO))
+    mover = mocker.patch("routes.fornecedores.storage.mover")
+    r = client.post(f"/api/fornecedores/{FORN}/pagamentos",
+                    json={"valor": 30000, "data_pagamento": "2026-08-24"}, headers=admin_headers)
+    assert r.status_code == 201
+    mover.assert_not_called()
+
+
+def test_registrar_pagamento_arquivo_token_forjado_400(client, admin_headers, mocker):
+    _saldo(mocker, 100000.0)
+    query = mocker.patch("routes.fornecedores.db.query", return_value=[{"id": FORN}])
+    execute = mocker.patch("routes.fornecedores.db.execute")
+    mover = mocker.patch("routes.fornecedores.storage.mover")
+    r = client.post(f"/api/fornecedores/{FORN}/pagamentos", json={
+        "valor": 30000, "data_pagamento": "2026-08-24",
+        "arquivo_token": f"{OUTRO}/pagamentos/abc.pdf",
+    }, headers=admin_headers)
+    assert r.status_code == 400
+    assert "arquivo_token" in r.get_json()["error"]
+    execute.assert_not_called()
+    mover.assert_not_called()
+
+
+# --- GET .../anexo ----------------------------------------------------------
+
+def test_anexo_pedido_devolve_url_assinada(client, admin_headers, mocker):
+    mocker.patch("routes.fornecedores.db.query", return_value=[{"arquivo_path": f"{FORN}/pedidos/p-1.pdf"}])
+    mocker.patch("routes.fornecedores.storage.url_assinada", return_value="https://x/assinada")
+    r = client.get(f"/api/fornecedores/{FORN}/pedidos/p-1/anexo", headers=admin_headers)
+    assert r.status_code == 200
+    assert r.get_json() == {"url": "https://x/assinada"}
+
+
+def test_anexo_pedido_sem_arquivo_404(client, admin_headers, mocker):
+    mocker.patch("routes.fornecedores.db.query", return_value=[{"arquivo_path": None}])
+    r = client.get(f"/api/fornecedores/{FORN}/pedidos/p-1/anexo", headers=admin_headers)
+    assert r.status_code == 404
+
+
+def test_anexo_pagamento_devolve_url_assinada(client, admin_headers, mocker):
+    query = mocker.patch("routes.fornecedores.db.query", return_value=[{"arquivo_path": f"{FORN}/pagamentos/pg-1.png"}])
+    mocker.patch("routes.fornecedores.storage.url_assinada", return_value="https://x/assinada2")
+    r = client.get(f"/api/fornecedores/{FORN}/pagamentos/pg-1/anexo", headers=admin_headers)
+    assert r.status_code == 200
+    assert r.get_json() == {"url": "https://x/assinada2"}
+    assert "fin_pagamentos_fornecedor" in query.call_args.args[0]
+
+
+def test_anexo_viewer_pode_ver(client, viewer_headers, mocker):
+    mocker.patch("routes.fornecedores.db.query", return_value=[{"arquivo_path": f"{FORN}/pedidos/p-1.pdf"}])
+    mocker.patch("routes.fornecedores.storage.url_assinada", return_value="https://x/assinada")
+    r = client.get(f"/api/fornecedores/{FORN}/pedidos/p-1/anexo", headers=viewer_headers)
+    assert r.status_code == 200
