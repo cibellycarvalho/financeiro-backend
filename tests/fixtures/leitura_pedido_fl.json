@@ -1,0 +1,12 @@
+{
+  "texto_vendedor": "Flavia",
+  "numero_pedido": "2026/9001",
+  "data_pedido": "2026-09-01",
+  "itens": [
+    {"produto": "CABO HDMI FIBRA 8K 20M", "quantidade": 150, "valor_unitario": 100.0},
+    {"produto": "EMENDA RJ45 EMBORRACHADO", "quantidade": 3000, "valor_unitario": 2.0},
+    {"produto": "", "quantidade": 1, "valor_unitario": 5.0},
+    {"produto": "ITEM SEM QUANTIDADE", "quantidade": 0, "valor_unitario": 9.0}
+  ],
+  "total_documento": 21000.0
+}
