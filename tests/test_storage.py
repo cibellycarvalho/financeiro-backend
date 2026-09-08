@@ -70,6 +70,17 @@ def test_limpar_pendentes_apaga_so_os_velhos(mocker):
     assert delete.call_args.kwargs["json"] == {"prefixes": ["pendentes/velho.pdf"]}
 
 
+def test_limpar_pendentes_ignora_created_at_invalido(mocker):
+    agora = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)
+    mocker.patch("storage.requests.post", return_value=_resp(200, [
+        {"name": "pasta", "created_at": None},
+        {"name": "velho.pdf", "created_at": (agora - timedelta(hours=30)).isoformat()},
+    ]))
+    delete = mocker.patch("storage.requests.delete", return_value=_resp(200))
+    assert storage.limpar_pendentes(agora=agora) == 1
+    assert delete.call_args.kwargs["json"] == {"prefixes": ["pendentes/velho.pdf"]}
+
+
 def test_limpar_pendentes_sem_velhos_nao_chama_delete(mocker):
     agora = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)
     mocker.patch("storage.requests.post", return_value=_resp(200, [

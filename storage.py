@@ -88,7 +88,10 @@ def limpar_pendentes(agora: datetime | None = None) -> int:
     _checar(resp, "listar pendentes")
     velhos = []
     for obj in resp.json():
-        criado = datetime.fromisoformat(obj["created_at"].replace("Z", "+00:00"))
+        try:
+            criado = datetime.fromisoformat(obj["created_at"].replace("Z", "+00:00"))
+        except (TypeError, ValueError, AttributeError, KeyError):
+            continue
         if agora - criado > _PENDENTES_TTL:
             velhos.append(f"pendentes/{obj['name']}")
     if not velhos:

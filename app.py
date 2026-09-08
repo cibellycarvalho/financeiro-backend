@@ -6,6 +6,10 @@ def create_app():
     app = Flask(__name__)
     app.config["SECRET_KEY"] = config.SECRET_KEY
 
+    # O limite de 10 MB por arquivo é checado na rota; este teto evita que um
+    # corpo gigante seja materializado em memória antes disso.
+    app.config["MAX_CONTENT_LENGTH"] = 11 * 1024 * 1024
+
     CORS(app, origins=config.ALLOWED_ORIGINS, supports_credentials=True)
 
     from routes.contas import bp as contas_bp

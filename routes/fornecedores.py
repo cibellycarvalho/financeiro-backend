@@ -1,4 +1,5 @@
 import re
+import sys
 
 from flask import Blueprint, request, jsonify, g
 import db
@@ -146,9 +147,20 @@ def _subir_pendente(dados, mime):
     """Limpa pendentes velhos e sobe o arquivo. Falha de limpeza não impede a leitura."""
     try:
         storage.limpar_pendentes()
-    except storage.StorageErro:
-        pass
+    except Exception as e:
+        print(f"[storage] limpeza de pendentes falhou: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
     return storage.enviar_pendente(dados, mime)
+
+
+def _aprender_alias_silencioso(fornecedor_id, texto, origem):
+    """O registro já está gravado: aprender o alias nunca vale um 500 que a
+    faria salvar de novo e duplicar."""
+    if not isinstance(texto, str) or not texto.strip():
+        return
+    try:
+        aliases.aprender_alias(fornecedor_id, texto, origem)
+    except Exception as e:
+        print(f"[aliases] falhou ao aprender '{texto[:60]}' ({origem}): {type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
 
 # Tokens legítimos sempre vêm de storage.enviar_pendente (uuid4().hex + ext
@@ -178,14 +190,17 @@ def ler_pedido_arquivo(fornecedor_id):
 
     try:
         lido = leitura_documento.ler_pedido(dados, mime)
-    except leitura_documento.LeituraIndisponivel:
+    except leitura_documento.LeituraIndisponivel as e:
+        print(f"[leitura_documento] indisponível ao ler pedido: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return jsonify({"error": MSG_LEITURA_INDISPONIVEL}), 503
-    except leitura_documento.LeituraFalhou:
+    except leitura_documento.LeituraFalhou as e:
+        print(f"[leitura_documento] falhou ao ler pedido: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         lido = None
 
     try:
         token = _subir_pendente(dados, mime)
-    except storage.StorageErro:
+    except storage.StorageErro as e:
+        print(f"[storage] falhou ao guardar arquivo do pedido: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return jsonify({"error": "Não consegui guardar o arquivo. Tente de novo."}), 500
 
     if lido is None:
@@ -295,11 +310,11 @@ def criar_pedido(fornecedor_id):
                     (destino, pedido["id"])
                 )
                 pedido["arquivo_path"] = destino
-    except storage.StorageErro:
+    except storage.StorageErro as e:
+        print(f"[storage] falhou ao mover anexo do pedido: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return jsonify({"error": "Não consegui guardar o anexo; o pedido não foi salvo. Tente de novo."}), 500
 
-    if alias_vendedor:
-        aliases.aprender_alias(fornecedor_id, alias_vendedor, "vendedor")
+    _aprender_alias_silencioso(fornecedor_id, alias_vendedor, "vendedor")
 
     pedido["itens"] = itens_criados
     return jsonify(pedido), 201
@@ -509,14 +524,17 @@ def ler_comprovante_arquivo(fornecedor_id):
 
     try:
         lido = leitura_documento.ler_comprovante(dados, mime)
-    except leitura_documento.LeituraIndisponivel:
+    except leitura_documento.LeituraIndisponivel as e:
+        print(f"[leitura_documento] indisponível ao ler comprovante: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return jsonify({"error": MSG_LEITURA_INDISPONIVEL}), 503
-    except leitura_documento.LeituraFalhou:
+    except leitura_documento.LeituraFalhou as e:
+        print(f"[leitura_documento] falhou ao ler comprovante: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         lido = None
 
     try:
         token = _subir_pendente(dados, mime)
-    except storage.StorageErro:
+    except storage.StorageErro as e:
+        print(f"[storage] falhou ao guardar arquivo do comprovante: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return jsonify({"error": "Não consegui guardar o arquivo. Tente de novo."}), 500
 
     if lido is None:
@@ -598,16 +616,16 @@ def registrar_pagamento(fornecedor_id):
     )
 
     # O pagamento já está gravado: o alias vale mesmo que o anexo falhe abaixo.
-    if alias_destinatario:
-        aliases.aprender_alias(fornecedor_id, alias_destinatario, "destinatario")
+    _aprender_alias_silencioso(fornecedor_id, alias_destinatario, "destinatario")
 
     if arquivo_token:
         destino = _destino_anexo(fornecedor_id, "pagamentos", row["id"], arquivo_token)
         try:
             storage.mover(arquivo_token, destino)
-        except storage.StorageErro:
+        except storage.StorageErro as e:
             # O pagamento já está gravado (é db.execute, não transação): não
             # desfazer — ela vê o pagamento sem clipe e pode subir de novo depois.
+            print(f"[storage] falhou ao mover anexo do pagamento: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
             row["arquivo_path"] = None
             row["aviso"] = "Pagamento salvo, mas o anexo não pôde ser guardado."
             return jsonify(row), 201
@@ -681,7 +699,8 @@ def _url_anexo(tabela, registro_id, fornecedor_id):
         return jsonify({"error": "Sem anexo"}), 404
     try:
         return jsonify({"url": storage.url_assinada(rows[0]["arquivo_path"])})
-    except storage.StorageErro:
+    except storage.StorageErro as e:
+        print(f"[storage] falhou ao assinar URL do anexo: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return jsonify({"error": "Não consegui abrir o anexo agora. Tente de novo."}), 500
 
 

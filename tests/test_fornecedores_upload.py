@@ -238,6 +238,29 @@ def test_criar_pedido_sem_campos_novos_continua_igual(client, admin_headers, moc
     aprender.assert_not_called()
 
 
+def test_criar_pedido_alias_que_falha_nao_derruba_o_pedido(client, admin_headers, mocker):
+    cur = _transacao_fake(mocker, [PEDIDO_NOVO, ITEM_NOVO])
+    mocker.patch("routes.fornecedores.aliases.aprender_alias", side_effect=RuntimeError("banco fora"))
+    r = client.post(f"/api/fornecedores/{FORN}/pedidos", json={
+        "data_pedido": "2026-09-01",
+        "itens": [{"produto": "CABO HDMI", "quantidade": 2, "valor_unitario": 10}],
+        "alias_vendedor": "Flavia",
+    }, headers=admin_headers)
+    assert r.status_code == 201
+
+
+def test_criar_pedido_alias_nao_string_e_ignorado(client, admin_headers, mocker):
+    _transacao_fake(mocker, [PEDIDO_NOVO, ITEM_NOVO])
+    aprender = mocker.patch("routes.fornecedores.aliases.aprender_alias")
+    r = client.post(f"/api/fornecedores/{FORN}/pedidos", json={
+        "data_pedido": "2026-09-01",
+        "itens": [{"produto": "CABO HDMI", "quantidade": 2, "valor_unitario": 10}],
+        "alias_vendedor": 2026,
+    }, headers=admin_headers)
+    assert r.status_code == 201
+    aprender.assert_not_called()
+
+
 def test_criar_pedido_storage_falhou_nao_grava(client, admin_headers, mocker):
     _transacao_fake(mocker, [PEDIDO_NOVO, ITEM_NOVO])
     mocker.patch("routes.fornecedores.storage.mover", side_effect=storage.StorageErro("x"))
