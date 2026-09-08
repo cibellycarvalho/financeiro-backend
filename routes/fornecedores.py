@@ -149,6 +149,11 @@ def _subir_pendente(dados, mime):
     return storage.enviar_pendente(dados, mime)
 
 
+def _destino_anexo(fornecedor_id, pasta, registro_id, arquivo_token):
+    ext = arquivo_token.rsplit(".", 1)[-1]
+    return f"{fornecedor_id}/{pasta}/{registro_id}.{ext}"
+
+
 @bp.post("/<fornecedor_id>/pedidos/ler")
 @require_auth
 @require_admin
@@ -238,26 +243,46 @@ def criar_pedido(fornecedor_id):
         return jsonify({"error": erro}), 400
 
     valor_total = sum(quantidade * valor_unitario for _, quantidade, valor_unitario in itens_validados)
+    numero_pedido = (data.get("numero_pedido") or "").strip() or None
+    arquivo_token = (data.get("arquivo_token") or "").strip() or None
+    alias_vendedor = data.get("alias_vendedor")
 
-    with db.transaction() as cur:
-        cur.execute(
-            """INSERT INTO fin_pedidos_fornecedor
-               (fornecedor_id, data_pedido, valor_total, observacao, criado_por)
-               VALUES (%s, %s, %s, %s, %s)
-               RETURNING *""",
-            (fornecedor_id, data["data_pedido"], valor_total, data.get("observacao"), g.user["user_id"])
-        )
-        pedido = dict(cur.fetchone())
-
-        itens_criados = []
-        for produto, quantidade, valor_unitario in itens_validados:
+    try:
+        with db.transaction() as cur:
             cur.execute(
-                """INSERT INTO fin_pedido_itens (pedido_id, produto, quantidade, valor_unitario)
-                   VALUES (%s, %s, %s, %s)
+                """INSERT INTO fin_pedidos_fornecedor
+                   (fornecedor_id, data_pedido, valor_total, observacao, numero_pedido, criado_por)
+                   VALUES (%s, %s, %s, %s, %s, %s)
                    RETURNING *""",
-                (pedido["id"], produto, quantidade, valor_unitario)
+                (fornecedor_id, data["data_pedido"], valor_total, data.get("observacao"),
+                 numero_pedido, g.user["user_id"])
             )
-            itens_criados.append(dict(cur.fetchone()))
+            pedido = dict(cur.fetchone())
+
+            itens_criados = []
+            for produto, quantidade, valor_unitario in itens_validados:
+                cur.execute(
+                    """INSERT INTO fin_pedido_itens (pedido_id, produto, quantidade, valor_unitario)
+                       VALUES (%s, %s, %s, %s)
+                       RETURNING *""",
+                    (pedido["id"], produto, quantidade, valor_unitario)
+                )
+                itens_criados.append(dict(cur.fetchone()))
+
+            # O anexo move dentro da transação: se o Storage falhar, nada é gravado.
+            if arquivo_token:
+                destino = _destino_anexo(fornecedor_id, "pedidos", pedido["id"], arquivo_token)
+                storage.mover(arquivo_token, destino)
+                cur.execute(
+                    "UPDATE fin_pedidos_fornecedor SET arquivo_path = %s WHERE id = %s",
+                    (destino, pedido["id"])
+                )
+                pedido["arquivo_path"] = destino
+    except storage.StorageErro:
+        return jsonify({"error": "Não consegui guardar o anexo; o pedido não foi salvo. Tente de novo."}), 500
+
+    if alias_vendedor:
+        aliases.aprender_alias(fornecedor_id, alias_vendedor, "vendedor")
 
     pedido["itens"] = itens_criados
     return jsonify(pedido), 201

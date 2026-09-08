@@ -1,4 +1,6 @@
 import io
+from contextlib import contextmanager
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -174,3 +176,76 @@ def test_ler_comprovante_api_indisponivel_503(client, admin_headers, mocker):
     r = client.post(f"/api/fornecedores/{FORN}/pagamentos/ler", data=_arquivo(),
                     headers=admin_headers, content_type="multipart/form-data")
     assert r.status_code == 503
+
+
+def _transacao_fake(mocker, retornos):
+    """db.transaction() cujo cursor devolve `retornos` em sequência no fetchone()."""
+    cur = MagicMock()
+    cur.fetchone.side_effect = retornos
+
+    @contextmanager
+    def _tx():
+        yield cur
+
+    mocker.patch("routes.fornecedores.db.transaction", _tx)
+    return cur
+
+
+PEDIDO_NOVO = {"id": "p-9", "fornecedor_id": FORN, "data_pedido": "2026-09-01", "valor_total": 20.0}
+ITEM_NOVO = {"id": "i-1", "pedido_id": "p-9", "produto": "CABO HDMI", "quantidade": 2, "valor_unitario": 10.0}
+
+
+# --- POST /pedidos com campos novos ----------------------------------------
+
+def test_criar_pedido_grava_numero_move_anexo_e_aprende_alias(client, admin_headers, mocker):
+    cur = _transacao_fake(mocker, [PEDIDO_NOVO, ITEM_NOVO])
+    mover = mocker.patch("routes.fornecedores.storage.mover")
+    aprender = mocker.patch("routes.fornecedores.aliases.aprender_alias")
+
+    r = client.post(f"/api/fornecedores/{FORN}/pedidos", json={
+        "data_pedido": "2026-09-01",
+        "itens": [{"produto": "CABO HDMI", "quantidade": 2, "valor_unitario": 10}],
+        "numero_pedido": "2026/9001",
+        "arquivo_token": "pendentes/abc.pdf",
+        "alias_vendedor": "Flavia",
+    }, headers=admin_headers)
+    assert r.status_code == 201
+
+    insert_sql, insert_params = cur.execute.call_args_list[0].args
+    assert "numero_pedido" in insert_sql
+    assert "2026/9001" in insert_params
+
+    mover.assert_called_once_with("pendentes/abc.pdf", f"{FORN}/pedidos/p-9.pdf")
+    update_sql, update_params = cur.execute.call_args_list[-1].args
+    assert "arquivo_path" in update_sql
+    assert update_params == (f"{FORN}/pedidos/p-9.pdf", "p-9")
+
+    aprender.assert_called_once_with(FORN, "Flavia", "vendedor")
+    assert r.get_json()["arquivo_path"] == f"{FORN}/pedidos/p-9.pdf"
+
+
+def test_criar_pedido_sem_campos_novos_continua_igual(client, admin_headers, mocker):
+    cur = _transacao_fake(mocker, [PEDIDO_NOVO, ITEM_NOVO])
+    mover = mocker.patch("routes.fornecedores.storage.mover")
+    aprender = mocker.patch("routes.fornecedores.aliases.aprender_alias")
+    r = client.post(f"/api/fornecedores/{FORN}/pedidos", json={
+        "data_pedido": "2026-09-01",
+        "itens": [{"produto": "CABO HDMI", "quantidade": 2, "valor_unitario": 10}],
+    }, headers=admin_headers)
+    assert r.status_code == 201
+    mover.assert_not_called()
+    aprender.assert_not_called()
+
+
+def test_criar_pedido_storage_falhou_nao_grava(client, admin_headers, mocker):
+    _transacao_fake(mocker, [PEDIDO_NOVO, ITEM_NOVO])
+    mocker.patch("routes.fornecedores.storage.mover", side_effect=storage.StorageErro("x"))
+    aprender = mocker.patch("routes.fornecedores.aliases.aprender_alias")
+    r = client.post(f"/api/fornecedores/{FORN}/pedidos", json={
+        "data_pedido": "2026-09-01",
+        "itens": [{"produto": "CABO HDMI", "quantidade": 2, "valor_unitario": 10}],
+        "arquivo_token": "pendentes/abc.pdf",
+    }, headers=admin_headers)
+    assert r.status_code == 500
+    assert "anexo" in r.get_json()["error"].lower()
+    aprender.assert_not_called()
