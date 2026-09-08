@@ -1,5 +1,8 @@
 from flask import Blueprint, request, jsonify, g
 import db
+import aliases
+import leitura_documento
+import storage
 from auth import require_auth, require_admin
 
 bp = Blueprint("fornecedores", __name__)
@@ -117,6 +120,85 @@ def listar_pedidos(fornecedor_id):
         (fornecedor_id,)
     )
     return jsonify(rows)
+
+
+_TAMANHO_MAX = 10 * 1024 * 1024
+MSG_LEITURA_INDISPONIVEL = "Leitura automática indisponível agora. Lance à mão."
+
+
+def _ler_arquivo_enviado():
+    """Valida o multipart 'arquivo'. Devolve (dados, mime, None) ou (None, None, (resposta, status))."""
+    arquivo = request.files.get("arquivo")
+    if arquivo is None or not arquivo.filename:
+        return None, None, (jsonify({"error": "arquivo obrigatório"}), 400)
+    mime = arquivo.mimetype
+    if mime not in storage.EXTENSOES:
+        return None, None, (jsonify({"error": "Só PDF, JPG ou PNG"}), 400)
+    dados = arquivo.read()
+    if len(dados) > _TAMANHO_MAX:
+        return None, None, (jsonify({"error": "Arquivo maior que 10 MB"}), 400)
+    return dados, mime, None
+
+
+def _subir_pendente(dados, mime):
+    """Limpa pendentes velhos e sobe o arquivo. Falha de limpeza não impede a leitura."""
+    try:
+        storage.limpar_pendentes()
+    except storage.StorageErro:
+        pass
+    return storage.enviar_pendente(dados, mime)
+
+
+@bp.post("/<fornecedor_id>/pedidos/ler")
+@require_auth
+@require_admin
+def ler_pedido_arquivo(fornecedor_id):
+    dados, mime, erro = _ler_arquivo_enviado()
+    if erro:
+        return erro
+
+    try:
+        lido = leitura_documento.ler_pedido(dados, mime)
+    except leitura_documento.LeituraIndisponivel:
+        return jsonify({"error": MSG_LEITURA_INDISPONIVEL}), 503
+    except leitura_documento.LeituraFalhou:
+        lido = None
+
+    try:
+        token = _subir_pendente(dados, mime)
+    except storage.StorageErro:
+        return jsonify({"error": "Não consegui guardar o arquivo. Tente de novo."}), 500
+
+    if lido is None:
+        return jsonify({
+            "leitura_falhou": True, "arquivo_token": token,
+            "fornecedor_sugerido_id": None, "texto_vendedor": None,
+            "numero_pedido": None, "data_pedido": None, "itens": [],
+            "total_documento": None, "pedido_existente": None,
+        })
+
+    existente = None
+    if lido["numero_pedido"]:
+        rows = db.query(
+            """SELECT id, data_pedido FROM fin_pedidos_fornecedor
+               WHERE fornecedor_id = %s AND numero_pedido = %s
+               ORDER BY created_at DESC LIMIT 1""",
+            (fornecedor_id, lido["numero_pedido"]),
+        )
+        if rows:
+            existente = {"id": rows[0]["id"], "data_pedido": rows[0]["data_pedido"]}
+
+    return jsonify({
+        "leitura_falhou": False,
+        "arquivo_token": token,
+        "fornecedor_sugerido_id": aliases.sugerir_fornecedor(lido["texto_vendedor"], "vendedor"),
+        "texto_vendedor": lido["texto_vendedor"],
+        "numero_pedido": lido["numero_pedido"],
+        "data_pedido": lido["data_pedido"],
+        "itens": lido["itens"],
+        "total_documento": lido["total_documento"],
+        "pedido_existente": existente,
+    })
 
 
 def _validar_itens(itens):
