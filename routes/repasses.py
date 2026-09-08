@@ -114,6 +114,10 @@ def sync_mp():
             break
         offset += limit
 
+    # Nome enganoso, de propósito: 'pluggy' e pluggy_transaction_id são só o
+    # rótulo e a coluna onde o sync do Mercado Pago grava. O Pluggy em si foi
+    # removido em 08/09/2026 junto com a conciliação bancária; renomear a coluna
+    # exigiria migração e reescrever linha já gravada, então o nome ficou.
     db.execute(
         "DELETE FROM fin_repasses_ml WHERE origem = 'pluggy' AND conta_ml = %s AND TO_CHAR(data_referencia, 'YYYY-MM') = %s",
         (conta_ml, mes)

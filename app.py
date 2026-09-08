@@ -13,7 +13,6 @@ def create_app():
     from routes.fornecedores import bp as fornecedores_bp
     from routes.dashboard import bp as dashboard_bp
     from routes.usuarios import bp as usuarios_bp
-    from routes.pluggy import bp as pluggy_bp
     from routes.fechamento import bp as fechamento_bp
     from routes.galpao import bp as galpao_bp
 
@@ -22,7 +21,6 @@ def create_app():
     app.register_blueprint(fornecedores_bp, url_prefix="/api/fornecedores")
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
     app.register_blueprint(usuarios_bp, url_prefix="/api/usuarios")
-    app.register_blueprint(pluggy_bp, url_prefix="/api/pluggy")
     app.register_blueprint(fechamento_bp, url_prefix="/api/fechamento")
     app.register_blueprint(galpao_bp, url_prefix="/api/fechamento")
 
