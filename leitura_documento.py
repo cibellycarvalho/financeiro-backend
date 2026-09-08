@@ -134,6 +134,8 @@ def _chamar(dados, mime, instrucao, esquema):
         raise LeituraFalhou(f"API recusou a requisição ({e.status_code})") from e
     except anthropic.APIConnectionError as e:
         raise LeituraIndisponivel(f"sem conexão com a API: {e}") from e
+    except anthropic.APIError as e:
+        raise LeituraFalhou(f"resposta inválida da API: {e}") from e
 
     if resp.stop_reason == "refusal":
         raise LeituraFalhou("modelo recusou o documento")

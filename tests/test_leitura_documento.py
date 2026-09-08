@@ -121,3 +121,15 @@ def test_chamar_erro_de_conexao_vira_indisponivel(monkeypatch, mocker):
     mocker.patch("leitura_documento.anthropic.Anthropic", return_value=client)
     with pytest.raises(ld.LeituraIndisponivel):
         ld._chamar(b"x", "image/png", "instrucao", {"type": "object"})
+
+
+def test_chamar_resposta_invalida_vira_leitura_falhou(monkeypatch, mocker):
+    import anthropic
+    monkeypatch.setattr("leitura_documento.config.ANTHROPIC_API_KEY", "sk-teste")
+    client = mocker.MagicMock()
+    client.messages.create.side_effect = anthropic.APIResponseValidationError(
+        response=mocker.MagicMock(status_code=200, headers={}), body=None
+    )
+    mocker.patch("leitura_documento.anthropic.Anthropic", return_value=client)
+    with pytest.raises(ld.LeituraFalhou):
+        ld._chamar(b"x", "image/png", "instrucao", {"type": "object"})
