@@ -127,6 +127,7 @@ def listar_pedidos(fornecedor_id):
 
 _TAMANHO_MAX = 10 * 1024 * 1024
 MSG_LEITURA_INDISPONIVEL = "Leitura automática indisponível agora. Lance à mão."
+MSG_ANEXO_NAO_GUARDADO = "Não consegui guardar o arquivo; dá para lançar assim mesmo, só sem o anexo."
 
 
 def _ler_arquivo_enviado():
@@ -197,15 +198,19 @@ def ler_pedido_arquivo(fornecedor_id):
         print(f"[leitura_documento] falhou ao ler pedido: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         lido = None
 
+    # Guardar o arquivo é o acessório: se o Storage falhar, ela ainda lança o
+    # que a IA leu — só sem o anexo. Bloquear aqui seria perder a leitura toda.
+    aviso = None
     try:
         token = _subir_pendente(dados, mime)
     except storage.StorageErro as e:
         print(f"[storage] falhou ao guardar arquivo do pedido: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        return jsonify({"error": "Não consegui guardar o arquivo. Tente de novo."}), 500
+        token = None
+        aviso = MSG_ANEXO_NAO_GUARDADO
 
     if lido is None:
         return jsonify({
-            "leitura_falhou": True, "arquivo_token": token,
+            "leitura_falhou": True, "arquivo_token": token, "aviso": aviso,
             "fornecedor_sugerido_id": None, "texto_vendedor": None,
             "numero_pedido": None, "data_pedido": None, "itens": [],
             "total_documento": None, "pedido_existente": None,
@@ -225,6 +230,7 @@ def ler_pedido_arquivo(fornecedor_id):
     return jsonify({
         "leitura_falhou": False,
         "arquivo_token": token,
+        "aviso": aviso,
         "fornecedor_sugerido_id": aliases.sugerir_fornecedor(lido["texto_vendedor"], "vendedor"),
         "texto_vendedor": lido["texto_vendedor"],
         "numero_pedido": lido["numero_pedido"],
@@ -531,15 +537,19 @@ def ler_comprovante_arquivo(fornecedor_id):
         print(f"[leitura_documento] falhou ao ler comprovante: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         lido = None
 
+    # Guardar o arquivo é o acessório: se o Storage falhar, ela ainda lança o
+    # que a IA leu — só sem o anexo. Bloquear aqui seria perder a leitura toda.
+    aviso = None
     try:
         token = _subir_pendente(dados, mime)
     except storage.StorageErro as e:
         print(f"[storage] falhou ao guardar arquivo do comprovante: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        return jsonify({"error": "Não consegui guardar o arquivo. Tente de novo."}), 500
+        token = None
+        aviso = MSG_ANEXO_NAO_GUARDADO
 
     if lido is None:
         return jsonify({
-            "leitura_falhou": True, "arquivo_token": token,
+            "leitura_falhou": True, "arquivo_token": token, "aviso": aviso,
             "valor": None, "data_pagamento": None, "destinatario": None,
             "id_transacao": None, "fornecedor_sugerido_id": None, "pagamento_existente": None,
         })
@@ -557,6 +567,7 @@ def ler_comprovante_arquivo(fornecedor_id):
     return jsonify({
         "leitura_falhou": False,
         "arquivo_token": token,
+        "aviso": aviso,
         "valor": lido["valor"],
         "data_pagamento": lido["data_pagamento"],
         "destinatario": lido["destinatario"],

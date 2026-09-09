@@ -111,15 +111,33 @@ def test_ler_pedido_viewer_403(client, viewer_headers):
     assert r.status_code == 403
 
 
-def test_ler_pedido_storage_falhou_no_envio_500_com_mensagem(client, admin_headers, mocker):
+def test_ler_pedido_storage_falhou_ainda_devolve_a_leitura(client, admin_headers, mocker):
+    """Perder o Storage não pode custar a leitura: ela lança sem anexo."""
     mocker.patch("routes.fornecedores.leitura_documento.ler_pedido", return_value=LIDO_PEDIDO)
     mocker.patch("routes.fornecedores.aliases.sugerir_fornecedor", return_value=None)
     mocker.patch("routes.fornecedores.db.query", return_value=[])
     mocker.patch("routes.fornecedores.storage.enviar_pendente", side_effect=storage.StorageErro("x"))
     r = client.post(f"/api/fornecedores/{FORN}/pedidos/ler", data=_arquivo(),
                     headers=admin_headers, content_type="multipart/form-data")
-    assert r.status_code == 500
-    assert "arquivo" in r.get_json()["error"].lower()
+    assert r.status_code == 200
+    corpo = r.get_json()
+    assert corpo["arquivo_token"] is None
+    assert "sem o anexo" in corpo["aviso"]
+    assert corpo["itens"] == LIDO_PEDIDO["itens"]
+
+
+def test_ler_comprovante_storage_falhou_ainda_devolve_a_leitura(client, admin_headers, mocker):
+    mocker.patch("routes.fornecedores.leitura_documento.ler_comprovante", return_value=LIDO_COMPROVANTE)
+    mocker.patch("routes.fornecedores.aliases.sugerir_fornecedor", return_value=None)
+    mocker.patch("routes.fornecedores.db.query", return_value=[])
+    mocker.patch("routes.fornecedores.storage.enviar_pendente", side_effect=storage.StorageErro("x"))
+    r = client.post(f"/api/fornecedores/{FORN}/pagamentos/ler", data=_arquivo(),
+                    headers=admin_headers, content_type="multipart/form-data")
+    assert r.status_code == 200
+    corpo = r.get_json()
+    assert corpo["arquivo_token"] is None
+    assert "sem o anexo" in corpo["aviso"]
+    assert corpo["valor"] == LIDO_COMPROVANTE["valor"]
 
 
 LIDO_COMPROVANTE = {
