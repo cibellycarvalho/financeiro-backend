@@ -24,7 +24,13 @@ def _base():
 
 
 def _headers(extra=None):
-    h = {"Authorization": f"Bearer {config.SUPABASE_SERVICE_KEY}"}
+    # Os dois cabeçalhos, como em routes/usuarios.py: as chaves novas
+    # (sb_secret_...) não são JWT, e sem o `apikey` o Storage tenta lê-las como
+    # token e responde "Invalid Compact JWS".
+    h = {
+        "apikey": config.SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_SERVICE_KEY}",
+    }
     if extra:
         h.update(extra)
     return h

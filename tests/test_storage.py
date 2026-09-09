@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import config
 import storage
 
 
@@ -24,6 +25,8 @@ def test_enviar_pendente_sobe_para_pasta_pendentes(mocker):
     headers = post.call_args.kwargs["headers"]
     assert headers["Content-Type"] == "application/pdf"
     assert headers["Authorization"].startswith("Bearer ")
+    # sem o apikey, chave sb_secret_ é lida como JWT e o Storage recusa
+    assert headers["apikey"] == config.SUPABASE_SERVICE_KEY
 
 
 def test_enviar_pendente_rejeita_mime_desconhecido():
