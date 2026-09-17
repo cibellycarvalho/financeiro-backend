@@ -14,6 +14,7 @@ def test_ler_semana_nunca_informada_devolve_200_vazio(client, admin_headers):
     assert r.status_code == 200
     corpo = r.get_json()
     assert corpo["saldo_conta"] is None and corpo["reserva_aplicada"] is None
+    assert corpo["retirada_reserva"] is None
     assert corpo["agenda"] == {} and corpo["ajustes_pagamento"] == {}
 
 
@@ -27,13 +28,14 @@ def test_gravar_faz_upsert_numa_linha_so(client, admin_headers):
     with patch("routes.planejamento.db.execute", return_value=LINHA) as ex:
         r = client.put(f"/api/planejamento/{SEMANA}", headers=admin_headers, json={
             "saldo_conta": 12000, "saldo_em": "2026-09-15T13:20:00.000Z", "reserva_aplicada": 50000,
-            "agenda": {"2026-09-15": 2280.51}, "ajustes_pagamento": {"pg-1": True},
+            "retirada_reserva": 40797, "agenda": {"2026-09-15": 2280.51}, "ajustes_pagamento": {"pg-1": True},
         })
     assert r.status_code == 200
     sql, params = ex.call_args[0]
     assert "ON CONFLICT (semana) DO UPDATE" in sql
     # a hora do saldo é a de quando ELA digitou, não a do servidor
-    assert params[:4] == (SEMANA, 12000.0, "2026-09-15T13:20:00.000Z", 50000.0)
+    assert params[:5] == (SEMANA, 12000.0, "2026-09-15T13:20:00.000Z", 50000.0, 40797.0)
+    assert "retirada_reserva = EXCLUDED.retirada_reserva" in sql
 
 
 def test_gravar_saldo_em_invalido_400(client, admin_headers):
@@ -97,3 +99,9 @@ def test_quem_nao_tem_papel_e_barrado(client, monkeypatch):
     monkeypatch.setattr("auth.verify_jwt", lambda t: {"user_id": "u", "fin_role": None})
     r = client.put(f"/api/planejamento/{SEMANA}", headers={"Authorization": "Bearer x"}, json={})
     assert r.status_code == 403
+
+
+def test_retirada_da_reserva_negativa_400(client, admin_headers):
+    r = client.put(f"/api/planejamento/{SEMANA}", headers=admin_headers, json={"retirada_reserva": -1})
+    assert r.status_code == 400
+    assert "retirada_reserva" in r.get_json()["error"]

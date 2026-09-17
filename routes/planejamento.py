@@ -63,7 +63,7 @@ def ler(semana):
         # Semana nunca informada é o estado normal de toda segunda de manhã.
         return jsonify({
             "semana": d.isoformat(), "saldo_conta": None, "saldo_em": None,
-            "reserva_aplicada": None, "agenda": {}, "ajustes_pagamento": {},
+            "reserva_aplicada": None, "retirada_reserva": None, "agenda": {}, "ajustes_pagamento": {},
             "updated_at": None,
         })
     return jsonify(rows[0])
@@ -87,10 +87,15 @@ def gravar(semana):
 
     saldo, e1 = numero("saldo_conta")
     reserva, e2 = numero("reserva_aplicada")
-    if e1 or e2:
-        return jsonify({"error": e1 or e2}), 400
+    # Quanto ela tirou da reserva nesta semana. É informação: não entra na sobra
+    # (decisão dela em 17/09/2026 — a sobra é só o que as vendas cobriram).
+    retirada, e3 = numero("retirada_reserva")
+    if e1 or e2 or e3:
+        return jsonify({"error": e1 or e2 or e3}), 400
     if reserva is not None and reserva < 0:
         return jsonify({"error": "reserva_aplicada não pode ser negativa"}), 400
+    if retirada is not None and retirada < 0:
+        return jsonify({"error": "retirada_reserva não pode ser negativa"}), 400
 
     # saldo_em vem da tela: é a hora em que o saldo foi DIGITADO, que decide o
     # que já estava fora da conta. Com now() do servidor, o saldo colado em
@@ -110,19 +115,20 @@ def gravar(semana):
 
     row = db.execute(
         """INSERT INTO fin_planejamento_semana
-               (semana, saldo_conta, saldo_em, reserva_aplicada, agenda, ajustes_pagamento,
-                informado_por, updated_at)
-           VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, now())
+               (semana, saldo_conta, saldo_em, reserva_aplicada, retirada_reserva, agenda,
+                ajustes_pagamento, informado_por, updated_at)
+           VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, now())
            ON CONFLICT (semana) DO UPDATE
                SET saldo_conta = EXCLUDED.saldo_conta,
                    saldo_em = EXCLUDED.saldo_em,
                    reserva_aplicada = EXCLUDED.reserva_aplicada,
+                   retirada_reserva = EXCLUDED.retirada_reserva,
                    agenda = EXCLUDED.agenda,
                    ajustes_pagamento = EXCLUDED.ajustes_pagamento,
                    informado_por = EXCLUDED.informado_por,
                    updated_at = now()
            RETURNING *""",
-        (d.isoformat(), saldo, saldo_em, reserva, json.dumps(agenda), json.dumps(ajustes),
+        (d.isoformat(), saldo, saldo_em, reserva, retirada, json.dumps(agenda), json.dumps(ajustes),
          g.user["user_id"])
     )
     return jsonify(row)
