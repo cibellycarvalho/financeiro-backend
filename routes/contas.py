@@ -1,9 +1,19 @@
+import calendar
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
 from flask import Blueprint, request, jsonify, g
-from datetime import date, timedelta
 import db
 from auth import require_auth, require_admin
 
 bp = Blueprint("contas", __name__)
+
+FUSO = ZoneInfo("America/Sao_Paulo")
+
+
+def _hoje():
+    # O servidor roda em UTC: depois das 21h ele ja esta no dia seguinte.
+    return datetime.now(FUSO).date()
 
 CATEGORIAS_VALIDAS = {"FORNECEDOR", "CONTABILIDADE", "IMPOSTO_DAS", "SISTEMA", "OUTRO"}
 MARCAS_VALIDAS = {"YUSO", "M12", "GERAL"}
@@ -19,14 +29,19 @@ def listar():
     conditions = ["1=1"]
     params = []
 
-    if periodo == "semana":
-        hoje = date.today()
-        conditions.append("vencimento BETWEEN %s AND %s")
-        params += [hoje.isoformat(), (hoje + timedelta(days=7)).isoformat()]
-    elif periodo == "mes":
-        hoje = date.today()
-        conditions.append("DATE_TRUNC('month', vencimento) = DATE_TRUNC('month', %s::date)")
-        params.append(hoje.isoformat())
+    # Periodo = o que vence dentro dele MAIS o que ja venceu e continua em aberto.
+    # Antes "semana" era hoje ate hoje+7: na quinta o boleto de segunda sumia da
+    # lista, ela achava que nao tinha salvo e lancava de novo (17/09/2026).
+    if periodo in ("semana", "mes"):
+        hoje = _hoje()
+        if periodo == "semana":
+            inicio = hoje - timedelta(days=hoje.weekday())
+            fim = inicio + timedelta(days=6)
+        else:
+            inicio = hoje.replace(day=1)
+            fim = hoje.replace(day=calendar.monthrange(hoje.year, hoje.month)[1])
+        conditions.append("(vencimento BETWEEN %s AND %s OR (status <> 'pago' AND vencimento < %s))")
+        params += [inicio.isoformat(), fim.isoformat(), inicio.isoformat()]
 
     if status:
         conditions.append("status = %s")
