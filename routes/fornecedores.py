@@ -533,6 +533,89 @@ def excluir_item(fornecedor_id, pedido_id, item_id):
     return jsonify(pedido_atualizado)
 
 
+def _pedido_do_fornecedor(fornecedor_id, pedido_id):
+    rows = db.query(
+        "SELECT id, valor_total, pago_em FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pedido_id, fornecedor_id)
+    )
+    return rows[0] if rows else None
+
+
+@bp.post("/<fornecedor_id>/pedidos/<pedido_id>/pago")
+@require_auth
+@require_admin
+def marcar_pedido_pago(fornecedor_id, pedido_id):
+    """Caixinha "pago" do pedido.
+
+    modo "lancar": lança o pagamento do valor do pedido, amarrado a ele — é o
+    que tira o dinheiro da Caixa da Semana.
+    modo "ja_lancado": o Pix já está lançado em Fornecedores; só marca o pedido,
+    sem pagamento novo. Recusa se o que já foi pago e não está preso a outro
+    pedido marcado não cobre este, porque aí marcar seria inventar dinheiro.
+    """
+    data = request.get_json() or {}
+    modo = data.get("modo")
+    if modo not in ("lancar", "ja_lancado"):
+        return jsonify({"error": "modo deve ser lancar ou ja_lancado"}), 400
+    data_pagamento = data.get("data_pagamento")
+    if not data_pagamento or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", data_pagamento):
+        return jsonify({"error": "data_pagamento obrigatória, no formato AAAA-MM-DD"}), 400
+
+    pedido = _pedido_do_fornecedor(fornecedor_id, pedido_id)
+    if not pedido:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+    if pedido["pago_em"]:
+        return jsonify({"error": "Esse pedido já está marcado como pago"}), 409
+    valor = float(pedido["valor_total"])
+
+    if modo == "lancar":
+        saldo_aberto = _saldo_aberto_fornecedor(fornecedor_id)
+        if valor > saldo_aberto + 0.005:
+            return jsonify({"error": f"Os pagamentos já lançados cobrem esse pedido (em aberto: R$ {saldo_aberto:.2f}). "
+                                     "Use \"Pix já lançado\"."}), 400
+        with db.transaction() as cur:
+            cur.execute(
+                """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, pedido_id, criado_por)
+                   VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+                (fornecedor_id, valor, data_pagamento, pedido_id, g.user["user_id"])
+            )
+            pagamento = dict(cur.fetchone())
+            cur.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s RETURNING *",
+                        (data_pagamento, pedido_id))
+            atualizado = dict(cur.fetchone())
+        atualizado["pagamento"] = pagamento
+        return jsonify(atualizado), 201
+
+    livre = db.query(
+        """SELECT
+             COALESCE((SELECT SUM(valor) FROM fin_pagamentos_fornecedor WHERE fornecedor_id = %s), 0)
+             - COALESCE((SELECT SUM(valor_total) FROM fin_pedidos_fornecedor
+                         WHERE fornecedor_id = %s AND pago_em IS NOT NULL), 0) AS livre""",
+        (fornecedor_id, fornecedor_id)
+    )
+    credito = float(livre[0]["livre"])
+    if valor > credito + 0.005:
+        return jsonify({"error": f"Os pagamentos lançados não cobrem esse pedido (livre: R$ {max(credito, 0):.2f}). "
+                                 "Lance o pagamento."}), 400
+    atualizado = db.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s RETURNING *",
+                            (data_pagamento, pedido_id))
+    return jsonify(atualizado), 201
+
+
+@bp.delete("/<fornecedor_id>/pedidos/<pedido_id>/pago")
+@require_auth
+@require_admin
+def desmarcar_pedido_pago(fornecedor_id, pedido_id):
+    """Desmarca a caixinha e apaga o pagamento amarrado ao pedido, se houver."""
+    if not _pedido_do_fornecedor(fornecedor_id, pedido_id):
+        return jsonify({"error": "Pedido não encontrado"}), 404
+    with db.transaction() as cur:
+        cur.execute("DELETE FROM fin_pagamentos_fornecedor WHERE pedido_id = %s AND fornecedor_id = %s",
+                    (pedido_id, fornecedor_id))
+        cur.execute("UPDATE fin_pedidos_fornecedor SET pago_em = NULL WHERE id = %s", (pedido_id,))
+    return "", 204
+
+
 @bp.get("/<fornecedor_id>/pagamentos")
 @require_auth
 def listar_pagamentos(fornecedor_id):
@@ -624,6 +707,9 @@ def registrar_pagamento(fornecedor_id):
 
     id_transacao = (data.get("id_transacao") or "").strip() or None
     arquivo_token = (data.get("arquivo_token") or "").strip() or None
+    pedido_id = (data.get("pedido_id") or "").strip() or None
+    if pedido_id and not _pedido_do_fornecedor(fornecedor_id, pedido_id):
+        return jsonify({"error": "Pedido não encontrado"}), 404
     alias_destinatario = data.get("alias_destinatario")
 
     if arquivo_token and not _arquivo_token_valido(arquivo_token):
@@ -643,11 +729,15 @@ def registrar_pagamento(fornecedor_id):
                                      f"(R$ {float(repetidos[0]['valor']):.2f})"}), 409
 
     row = db.execute(
-        """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, id_transacao, criado_por)
-           VALUES (%s, %s, %s, %s, %s)
+        """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, id_transacao, pedido_id, criado_por)
+           VALUES (%s, %s, %s, %s, %s, %s)
            RETURNING *""",
-        (fornecedor_id, valor, data["data_pagamento"], id_transacao, g.user["user_id"])
+        (fornecedor_id, valor, data["data_pagamento"], id_transacao, pedido_id, g.user["user_id"])
     )
+    # Pedido subido já pago: a caixinha nasce marcada.
+    if pedido_id:
+        db.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s",
+                   (data["data_pagamento"], pedido_id))
 
     # O pagamento já está gravado: o alias vale mesmo que o anexo falhe abaixo.
     _aprender_alias_silencioso(fornecedor_id, alias_destinatario, "destinatario")
@@ -711,7 +801,7 @@ def editar_pagamento(fornecedor_id, pagamento_id):
 @require_admin
 def excluir_pagamento(fornecedor_id, pagamento_id):
     pagamentos = db.query(
-        "SELECT id FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        "SELECT id, pedido_id FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
         (pagamento_id, fornecedor_id)
     )
     if not pagamentos:
@@ -721,6 +811,10 @@ def excluir_pagamento(fornecedor_id, pagamento_id):
         "DELETE FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
         (pagamento_id, fornecedor_id)
     )
+    # Apagou o pagamento que a caixinha lançou: o pedido volta a estar em aberto.
+    if pagamentos[0].get("pedido_id"):
+        db.execute("UPDATE fin_pedidos_fornecedor SET pago_em = NULL WHERE id = %s",
+                   (pagamentos[0]["pedido_id"],))
     return "", 204
 
 

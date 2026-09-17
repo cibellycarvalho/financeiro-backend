@@ -504,3 +504,68 @@ def test_pagamentos_do_periodo_traz_todos_os_fornecedores(client, admin_headers)
 def test_pagamentos_do_periodo_exige_datas_validas(client, admin_headers):
     resp = client.get("/api/fornecedores/pagamentos?de=ontem&ate=2026-09-20", headers=admin_headers)
     assert resp.status_code == 400
+
+
+F_ID = FORNECEDOR_FIXTURE["id"]
+P_ID = PEDIDO_FIXTURE["id"]
+URL_PAGO = f"/api/fornecedores/{F_ID}/pedidos/{P_ID}/pago"
+
+
+def test_caixinha_lancar_cria_pagamento_amarrado_e_marca_pedido(client, admin_headers):
+    pedido = [{"id": P_ID, "valor_total": 35310.00, "pago_em": None}]
+    saldo = [{"saldo_aberto": 273320.00}]
+    mock_transaction, mock_cur = _mock_transaction_cursor([
+        {"id": "pg1", "valor": 35310.00, "pedido_id": P_ID},
+        {"id": P_ID, "pago_em": "2026-09-17"},
+    ])
+    with patch("routes.fornecedores.db.query", side_effect=[pedido, saldo]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
+        resp = client.post(URL_PAGO, json={"modo": "lancar", "data_pagamento": "2026-09-17"}, headers=admin_headers)
+    assert resp.status_code == 201
+    assert resp.get_json()["pagamento"]["pedido_id"] == P_ID
+    insert_sql, params = mock_cur.execute.call_args_list[0][0]
+    assert "INSERT INTO fin_pagamentos_fornecedor" in insert_sql
+    assert params[1] == 35310.00 and params[3] == P_ID
+
+
+def test_caixinha_ja_lancado_recusa_quando_pix_nao_cobre(client, admin_headers):
+    pedido = [{"id": P_ID, "valor_total": 40400.00, "pago_em": None}]
+    livre = [{"livre": 400.00}]
+    with patch("routes.fornecedores.db.query", side_effect=[pedido, livre]), \
+         patch("routes.fornecedores.db.execute") as mock_execute:
+        resp = client.post(URL_PAGO, json={"modo": "ja_lancado", "data_pagamento": "2026-08-19"}, headers=admin_headers)
+    assert resp.status_code == 400
+    mock_execute.assert_not_called()
+
+
+def test_caixinha_ja_lancado_so_marca(client, admin_headers):
+    pedido = [{"id": P_ID, "valor_total": 400.00, "pago_em": None}]
+    livre = [{"livre": 91910.00}]
+    with patch("routes.fornecedores.db.query", side_effect=[pedido, livre]), \
+         patch("routes.fornecedores.db.execute", return_value={"id": P_ID, "pago_em": "2026-08-26"}) as mock_execute:
+        resp = client.post(URL_PAGO, json={"modo": "ja_lancado", "data_pagamento": "2026-08-26"}, headers=admin_headers)
+    assert resp.status_code == 201
+    assert "UPDATE fin_pedidos_fornecedor SET pago_em" in mock_execute.call_args[0][0]
+
+
+def test_caixinha_pedido_ja_pago_retorna_409(client, admin_headers):
+    pedido = [{"id": P_ID, "valor_total": 400.00, "pago_em": "2026-08-26"}]
+    with patch("routes.fornecedores.db.query", side_effect=[pedido]):
+        resp = client.post(URL_PAGO, json={"modo": "lancar", "data_pagamento": "2026-09-17"}, headers=admin_headers)
+    assert resp.status_code == 409
+
+
+def test_desmarcar_caixinha_apaga_pagamento_amarrado(client, admin_headers):
+    mock_transaction, mock_cur = _mock_transaction_cursor([])
+    with patch("routes.fornecedores.db.query", return_value=[{"id": P_ID, "valor_total": 1, "pago_em": "2026-09-17"}]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
+        resp = client.delete(URL_PAGO, headers=admin_headers)
+    assert resp.status_code == 204
+    sqls = [c[0][0] for c in mock_cur.execute.call_args_list]
+    assert "DELETE FROM fin_pagamentos_fornecedor WHERE pedido_id" in sqls[0]
+    assert "pago_em = NULL" in sqls[1]
+
+
+def test_caixinha_viewer_nao_pode_marcar_viewer(client, viewer_headers):
+    resp = client.post(URL_PAGO, json={"modo": "lancar", "data_pagamento": "2026-09-17"}, headers=viewer_headers)
+    assert resp.status_code == 403
