@@ -92,33 +92,37 @@ def gravar(semana):
     if reserva is not None and reserva < 0:
         return jsonify({"error": "reserva_aplicada não pode ser negativa"}), 400
 
+    # saldo_em vem da tela: é a hora em que o saldo foi DIGITADO, que decide o
+    # que já estava fora da conta. Com now() do servidor, o saldo colado em
+    # outro aparelho subiria com a hora de agora e mudaria a sobra.
+    saldo_em = data.get("saldo_em")
+    if saldo_em is not None:
+        try:
+            datetime.fromisoformat(str(saldo_em).replace("Z", "+00:00"))
+        except ValueError:
+            return jsonify({"error": "saldo_em deve ser data e hora ISO"}), 400
+
     agenda = data.get("agenda", {})
     ajustes = data.get("ajustes_pagamento", {})
     problema = _agenda_invalida(agenda, d) or _ajustes_invalidos(ajustes)
     if problema:
         return jsonify({"error": problema}), 400
 
-    # saldo_em só anda quando o saldo muda: é ele que diz o que já estava fora
-    # da conta na regra anti-desconto-duplo. Salvar a agenda não pode mexer nele.
     row = db.execute(
         """INSERT INTO fin_planejamento_semana
                (semana, saldo_conta, saldo_em, reserva_aplicada, agenda, ajustes_pagamento,
                 informado_por, updated_at)
-           VALUES (%s, %s, CASE WHEN %s::numeric IS NULL THEN NULL ELSE now() END,
-                   %s, %s::jsonb, %s::jsonb, %s, now())
+           VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, now())
            ON CONFLICT (semana) DO UPDATE
-               SET saldo_em = CASE
-                       WHEN fin_planejamento_semana.saldo_conta IS DISTINCT FROM EXCLUDED.saldo_conta
-                       THEN CASE WHEN EXCLUDED.saldo_conta IS NULL THEN NULL ELSE now() END
-                       ELSE fin_planejamento_semana.saldo_em END,
-                   saldo_conta = EXCLUDED.saldo_conta,
+               SET saldo_conta = EXCLUDED.saldo_conta,
+                   saldo_em = EXCLUDED.saldo_em,
                    reserva_aplicada = EXCLUDED.reserva_aplicada,
                    agenda = EXCLUDED.agenda,
                    ajustes_pagamento = EXCLUDED.ajustes_pagamento,
                    informado_por = EXCLUDED.informado_por,
                    updated_at = now()
            RETURNING *""",
-        (d.isoformat(), saldo, saldo, reserva, json.dumps(agenda), json.dumps(ajustes),
+        (d.isoformat(), saldo, saldo_em, reserva, json.dumps(agenda), json.dumps(ajustes),
          g.user["user_id"])
     )
     return jsonify(row)

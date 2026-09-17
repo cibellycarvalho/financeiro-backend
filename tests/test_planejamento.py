@@ -26,17 +26,20 @@ def test_ler_semana_informada(client, admin_headers):
 def test_gravar_faz_upsert_numa_linha_so(client, admin_headers):
     with patch("routes.planejamento.db.execute", return_value=LINHA) as ex:
         r = client.put(f"/api/planejamento/{SEMANA}", headers=admin_headers, json={
-            "saldo_conta": 12000, "reserva_aplicada": 50000,
+            "saldo_conta": 12000, "saldo_em": "2026-09-15T13:20:00.000Z", "reserva_aplicada": 50000,
             "agenda": {"2026-09-15": 2280.51}, "ajustes_pagamento": {"pg-1": True},
         })
     assert r.status_code == 200
     sql, params = ex.call_args[0]
     assert "ON CONFLICT (semana) DO UPDATE" in sql
-    # a hora do saldo só muda quando o saldo muda — é ela que decide o que já
-    # estava fora da conta na regra anti-desconto-duplo
-    assert "IS DISTINCT FROM EXCLUDED.saldo_conta" in sql
-    # saldo vai duas vezes: no valor e no CASE que decide se saldo_em nasce
-    assert params[:4] == (SEMANA, 12000.0, 12000.0, 50000.0)
+    # a hora do saldo é a de quando ELA digitou, não a do servidor
+    assert params[:4] == (SEMANA, 12000.0, "2026-09-15T13:20:00.000Z", 50000.0)
+
+
+def test_gravar_saldo_em_invalido_400(client, admin_headers):
+    r = client.put(f"/api/planejamento/{SEMANA}", headers=admin_headers,
+                   json={"saldo_conta": 1, "saldo_em": "ontem à tarde"})
+    assert r.status_code == 400
 
 
 def test_gravar_semana_que_nao_e_segunda_400(client, admin_headers):
