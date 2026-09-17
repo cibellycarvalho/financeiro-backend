@@ -300,3 +300,14 @@ def test_viewer_nao_grava_lancamento(client, viewer_headers):
     assert client.post(f"/api/funcionarios/{FUNC}/lancamentos", json={}, headers=viewer_headers).status_code == 403
     assert client.put(f"/api/funcionarios/{FUNC}/lancamentos/l-1", json={}, headers=viewer_headers).status_code == 403
     assert client.delete(f"/api/funcionarios/{FUNC}/lancamentos/l-1", headers=viewer_headers).status_code == 403
+
+
+def test_corpo_que_nao_e_objeto_json_da_400_nao_500(client, admin_headers):
+    r = client.post("/api/funcionarios", json=[1, 2, 3], headers=admin_headers)
+    assert r.status_code == 400 and "JSON" in r.get_json()["error"]
+    r = client.post(f"/api/funcionarios/{FUNC}/lancamentos", json="x", headers=admin_headers)
+    assert r.status_code == 400 and "JSON" in r.get_json()["error"]
+    r = client.put(f"/api/funcionarios/{FUNC}/lancamentos/l-1", json=42, headers=admin_headers)
+    assert r.status_code == 400 and "JSON" in r.get_json()["error"]
+    r = client.put(f"/api/funcionarios/{FUNC}", json=True, headers=admin_headers)
+    assert r.status_code == 400 and "JSON" in r.get_json()["error"]

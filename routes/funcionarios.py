@@ -42,6 +42,12 @@ def _erro(msg, status=400):
     return jsonify({"error": msg}), status
 
 
+def _corpo():
+    """JSON do request como dict, ou None se não veio um objeto JSON."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else None
+
+
 def _competencia(texto):
     """'2026-09' ou '2026-09-15' → date(2026, 9, 1); qualquer outra coisa → None."""
     if not isinstance(texto, str):
@@ -155,7 +161,10 @@ def listar():
 @require_auth
 @require_admin
 def criar():
-    nome, cnpj, valor, erro = _campos_cadastro(request.get_json() or {})
+    data = _corpo()
+    if data is None:
+        return _erro("corpo inválido: envie um objeto JSON")
+    nome, cnpj, valor, erro = _campos_cadastro(data)
     if erro:
         return _erro(erro)
     row = db.execute(
@@ -169,7 +178,10 @@ def criar():
 @require_auth
 @require_admin
 def editar(fid):
-    nome, cnpj, valor, erro = _campos_cadastro(request.get_json() or {})
+    data = _corpo()
+    if data is None:
+        return _erro("corpo inválido: envie um objeto JSON")
+    nome, cnpj, valor, erro = _campos_cadastro(data)
     if erro:
         return _erro(erro)
     row = db.execute(
@@ -384,7 +396,9 @@ def meses(fid):
 @require_auth
 @require_admin
 def criar_lancamento(fid):
-    data = request.get_json() or {}
+    data = _corpo()
+    if data is None:
+        return _erro("corpo inválido: envie um objeto JSON")
     tipo = data.get("tipo")
     if tipo not in TIPOS:
         return _erro("tipo deve ser pagamento, das ou nf")
@@ -432,7 +446,9 @@ def criar_lancamento(fid):
 @require_auth
 @require_admin
 def editar_lancamento(fid, lid):
-    data = request.get_json() or {}
+    data = _corpo()
+    if data is None:
+        return _erro("corpo inválido: envie um objeto JSON")
     rows = db.query("SELECT * FROM fin_funcionario_lancamentos WHERE id = %s AND funcionario_id = %s", (lid, fid))
     if not rows:
         return _erro("Lançamento não encontrado", 404)
