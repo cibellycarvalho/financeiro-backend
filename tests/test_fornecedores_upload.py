@@ -307,15 +307,6 @@ def test_criar_pedido_arquivo_token_forjado_400(client, admin_headers, mocker):
     mover.assert_not_called()
 
 
-def test_destino_anexo_rejeita_token_fora_de_pendentes():
-    from routes.fornecedores import _destino_anexo
-    with pytest.raises(ValueError):
-        _destino_anexo(FORN, "pedidos", "p-9", "pendentes/../outro.pdf")
-    with pytest.raises(ValueError):
-        _destino_anexo(FORN, "pedidos", "p-9", "pendentes/abc.pdf")  # hex curto demais
-    assert _destino_anexo(FORN, "pedidos", "p-9", "pendentes/" + "a" * 32 + ".png") == f"{FORN}/pedidos/p-9.png"
-
-
 # --- POST /pagamentos com campos novos -------------------------------------
 
 PAGAMENTO_NOVO = {"id": "pg-9", "fornecedor_id": FORN, "valor": 30000.0, "data_pagamento": "2026-08-24"}

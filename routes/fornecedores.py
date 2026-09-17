@@ -2,6 +2,8 @@ import re
 import sys
 
 from flask import Blueprint, request, jsonify, g
+import anexos
+from anexos import MSG_LEITURA_INDISPONIVEL, MSG_ANEXO_NAO_GUARDADO
 import db
 import aliases
 import leitura_documento
@@ -148,34 +150,6 @@ def listar_pedidos(fornecedor_id):
     return jsonify(rows)
 
 
-_TAMANHO_MAX = 10 * 1024 * 1024
-MSG_LEITURA_INDISPONIVEL = "Leitura automática indisponível agora. Lance à mão."
-MSG_ANEXO_NAO_GUARDADO = "Não consegui guardar o arquivo; dá para lançar assim mesmo, só sem o anexo."
-
-
-def _ler_arquivo_enviado():
-    """Valida o multipart 'arquivo'. Devolve (dados, mime, None) ou (None, None, (resposta, status))."""
-    arquivo = request.files.get("arquivo")
-    if arquivo is None or not arquivo.filename:
-        return None, None, (jsonify({"error": "arquivo obrigatório"}), 400)
-    mime = arquivo.mimetype
-    if mime not in storage.EXTENSOES:
-        return None, None, (jsonify({"error": "Só PDF, JPG ou PNG"}), 400)
-    dados = arquivo.read()
-    if len(dados) > _TAMANHO_MAX:
-        return None, None, (jsonify({"error": "Arquivo maior que 10 MB"}), 400)
-    return dados, mime, None
-
-
-def _subir_pendente(dados, mime):
-    """Limpa pendentes velhos e sobe o arquivo. Falha de limpeza não impede a leitura."""
-    try:
-        storage.limpar_pendentes()
-    except Exception as e:
-        print(f"[storage] limpeza de pendentes falhou: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-    return storage.enviar_pendente(dados, mime)
-
-
 def _aprender_alias_silencioso(fornecedor_id, texto, origem):
     """O registro já está gravado: aprender o alias nunca vale um 500 que a
     faria salvar de novo e duplicar."""
@@ -187,28 +161,11 @@ def _aprender_alias_silencioso(fornecedor_id, texto, origem):
         print(f"[aliases] falhou ao aprender '{texto[:60]}' ({origem}): {type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
 
-# Tokens legítimos sempre vêm de storage.enviar_pendente (uuid4().hex + ext
-# aceita). Qualquer outra forma é entrada forjada — sem isso, um token como
-# "outro-fornecedor/pedidos/x.pdf" moveria o anexo de outro registro.
-_RE_ARQUIVO_TOKEN = re.compile(r"^pendentes/[0-9a-f]{32}\.(pdf|jpg|png)$")
-
-
-def _arquivo_token_valido(token):
-    return bool(token) and _RE_ARQUIVO_TOKEN.match(token) is not None
-
-
-def _destino_anexo(fornecedor_id, pasta, registro_id, arquivo_token):
-    if not _arquivo_token_valido(arquivo_token):
-        raise ValueError("arquivo_token inválido")
-    ext = arquivo_token.rsplit(".", 1)[-1]
-    return f"{fornecedor_id}/{pasta}/{registro_id}.{ext}"
-
-
 @bp.post("/<fornecedor_id>/pedidos/ler")
 @require_auth
 @require_admin
 def ler_pedido_arquivo(fornecedor_id):
-    dados, mime, erro = _ler_arquivo_enviado()
+    dados, mime, erro = anexos.ler_arquivo_enviado()
     if erro:
         return erro
 
@@ -225,7 +182,7 @@ def ler_pedido_arquivo(fornecedor_id):
     # que a IA leu — só sem o anexo. Bloquear aqui seria perder a leitura toda.
     aviso = None
     try:
-        token = _subir_pendente(dados, mime)
+        token = anexos.subir_pendente(dados, mime)
     except storage.StorageErro as e:
         print(f"[storage] falhou ao guardar arquivo do pedido: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         token = None
@@ -305,7 +262,7 @@ def criar_pedido(fornecedor_id):
     arquivo_token = (data.get("arquivo_token") or "").strip() or None
     alias_vendedor = data.get("alias_vendedor")
 
-    if arquivo_token and not _arquivo_token_valido(arquivo_token):
+    if arquivo_token and not anexos.arquivo_token_valido(arquivo_token):
         return jsonify({"error": "arquivo_token inválido"}), 400
 
     try:
@@ -332,7 +289,7 @@ def criar_pedido(fornecedor_id):
 
             # O anexo move dentro da transação: se o Storage falhar, nada é gravado.
             if arquivo_token:
-                destino = _destino_anexo(fornecedor_id, "pedidos", pedido["id"], arquivo_token)
+                destino = anexos.destino_anexo(fornecedor_id, "pedidos", pedido["id"], arquivo_token)
                 storage.mover(arquivo_token, destino)
                 cur.execute(
                     "UPDATE fin_pedidos_fornecedor SET arquivo_path = %s WHERE id = %s",
@@ -630,7 +587,7 @@ def listar_pagamentos(fornecedor_id):
 @require_auth
 @require_admin
 def ler_comprovante_arquivo(fornecedor_id):
-    dados, mime, erro = _ler_arquivo_enviado()
+    dados, mime, erro = anexos.ler_arquivo_enviado()
     if erro:
         return erro
 
@@ -647,7 +604,7 @@ def ler_comprovante_arquivo(fornecedor_id):
     # que a IA leu — só sem o anexo. Bloquear aqui seria perder a leitura toda.
     aviso = None
     try:
-        token = _subir_pendente(dados, mime)
+        token = anexos.subir_pendente(dados, mime)
     except storage.StorageErro as e:
         print(f"[storage] falhou ao guardar arquivo do comprovante: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         token = None
@@ -712,7 +669,7 @@ def registrar_pagamento(fornecedor_id):
         return jsonify({"error": "Pedido não encontrado"}), 404
     alias_destinatario = data.get("alias_destinatario")
 
-    if arquivo_token and not _arquivo_token_valido(arquivo_token):
+    if arquivo_token and not anexos.arquivo_token_valido(arquivo_token):
         return jsonify({"error": "arquivo_token inválido"}), 400
 
     # Checagem antes do INSERT para responder 409 com mensagem; o índice único
@@ -743,7 +700,7 @@ def registrar_pagamento(fornecedor_id):
     _aprender_alias_silencioso(fornecedor_id, alias_destinatario, "destinatario")
 
     if arquivo_token:
-        destino = _destino_anexo(fornecedor_id, "pagamentos", row["id"], arquivo_token)
+        destino = anexos.destino_anexo(fornecedor_id, "pagamentos", row["id"], arquivo_token)
         try:
             storage.mover(arquivo_token, destino)
         except storage.StorageErro as e:
@@ -818,27 +775,13 @@ def excluir_pagamento(fornecedor_id, pagamento_id):
     return "", 204
 
 
-def _url_anexo(tabela, registro_id, fornecedor_id):
-    rows = db.query(
-        f"SELECT arquivo_path FROM {tabela} WHERE id = %s AND fornecedor_id = %s",
-        (registro_id, fornecedor_id)
-    )
-    if not rows or not rows[0]["arquivo_path"]:
-        return jsonify({"error": "Sem anexo"}), 404
-    try:
-        return jsonify({"url": storage.url_assinada(rows[0]["arquivo_path"])})
-    except storage.StorageErro as e:
-        print(f"[storage] falhou ao assinar URL do anexo: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        return jsonify({"error": "Não consegui abrir o anexo agora. Tente de novo."}), 500
-
-
 @bp.get("/<fornecedor_id>/pedidos/<pedido_id>/anexo")
 @require_auth
 def anexo_pedido(fornecedor_id, pedido_id):
-    return _url_anexo("fin_pedidos_fornecedor", pedido_id, fornecedor_id)
+    return anexos.url_anexo("fin_pedidos_fornecedor", "fornecedor_id", fornecedor_id, pedido_id)
 
 
 @bp.get("/<fornecedor_id>/pagamentos/<pagamento_id>/anexo")
 @require_auth
 def anexo_pagamento(fornecedor_id, pagamento_id):
-    return _url_anexo("fin_pagamentos_fornecedor", pagamento_id, fornecedor_id)
+    return anexos.url_anexo("fin_pagamentos_fornecedor", "fornecedor_id", fornecedor_id, pagamento_id)
