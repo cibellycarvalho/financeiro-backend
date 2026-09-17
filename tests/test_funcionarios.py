@@ -69,6 +69,20 @@ def test_criar_exige_nome_e_normaliza_cnpj(client, admin_headers, mocker):
     assert r.status_code == 400
 
 
+def test_criar_com_nome_ou_cnpj_fora_de_texto_da_400_nao_500(client, admin_headers, mocker):
+    execute = mocker.patch("routes.funcionarios.db.execute", return_value={**JOSIE})
+
+    r = client.post("/api/funcionarios", json={"nome": 12345}, headers=admin_headers)
+    assert r.status_code == 400
+
+    r = client.post("/api/funcionarios", json={"nome": "X", "cnpj": ["a"]}, headers=admin_headers)
+    assert r.status_code == 400
+
+    r = client.post("/api/funcionarios", json={"nome": "X", "cnpj": 12345678000195}, headers=admin_headers)
+    assert r.status_code == 201
+    assert execute.call_args.args[1][:2] == ("X", "12345678000195")
+
+
 def test_editar_e_desativar(client, admin_headers, mocker):
     execute = mocker.patch("routes.funcionarios.db.execute", return_value={**JOSIE, "nome": "Josie R."})
     r = client.put(f"/api/funcionarios/{FUNC}", json={"nome": "Josie R.", "cnpj": "", "valor_combinado": None},

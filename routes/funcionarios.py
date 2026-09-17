@@ -98,12 +98,19 @@ def _funcionario(fid):
 
 def _campos_cadastro(data):
     """Devolve (nome, cnpj, valor_combinado, erro)."""
-    nome = (data.get("nome") or "").strip()
+    nome_bruto = data.get("nome")
+    nome = nome_bruto.strip() if isinstance(nome_bruto, str) else ""
     if not nome:
         return None, None, None, "nome obrigatório"
-    cnpj = re.sub(r"\D", "", data.get("cnpj") or "") or None
-    if cnpj and len(cnpj) != 14:
-        return None, None, None, "CNPJ precisa ter 14 dígitos"
+    cnpj_bruto = data.get("cnpj")
+    cnpj = None
+    if cnpj_bruto not in (None, ""):
+        # str() antes do regex: um CNPJ pode chegar como número do JSON
+        # (12345678000195), e um valor solto (lista/objeto) precisa virar
+        # "lixo" que falha na checagem de tamanho em vez de estourar aqui.
+        cnpj = re.sub(r"\D", "", str(cnpj_bruto))
+        if len(cnpj) != 14:
+            return None, None, None, "CNPJ precisa ter 14 dígitos"
     valor = data.get("valor_combinado")
     if valor in (None, ""):
         valor = None
