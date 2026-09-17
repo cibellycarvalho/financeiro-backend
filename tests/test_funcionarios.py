@@ -311,3 +311,104 @@ def test_corpo_que_nao_e_objeto_json_da_400_nao_500(client, admin_headers):
     assert r.status_code == 400 and "JSON" in r.get_json()["error"]
     r = client.put(f"/api/funcionarios/{FUNC}", json=True, headers=admin_headers)
     assert r.status_code == 400 and "JSON" in r.get_json()["error"]
+
+
+# --- /ler ---------------------------------------------------------------------
+import io
+
+
+def _arquivo(nome="doc.pdf", mime="application/pdf", conteudo=b"%PDF-1.4 fake"):
+    return {"arquivo": (io.BytesIO(conteudo), nome, mime)}
+
+
+@pytest.fixture
+def storage_ok(mocker):
+    mocker.patch("routes.funcionarios.storage.limpar_pendentes", return_value=0)
+    mocker.patch("routes.funcionarios.storage.enviar_pendente", return_value="pendentes/abc.pdf")
+
+
+def test_ler_pix_devolve_leitura_token_e_pix_repetido(client, admin_headers, mocker, storage_ok):
+    mocker.patch("routes.funcionarios.leitura_documento.ler_comprovante", return_value={
+        "valor": 2500.0, "data_pagamento": "2026-09-15", "destinatario": "JOSIE DA SILVA", "id_transacao": "E81zz"})
+    _db(mocker, {"FROM fin_funcionarios WHERE": [JOSIE],
+                 "UNION ALL": [{"id": "l-1", "data_pagamento": "2026-09-15", "valor": 2500.0, "onde": "funcionário"}]})
+    r = client.post(f"/api/funcionarios/{FUNC}/ler/pix", data=_arquivo(), headers=admin_headers,
+                    content_type="multipart/form-data")
+    assert r.status_code == 200
+    lido = r.get_json()
+    assert lido["leitura_falhou"] is False and lido["arquivo_token"] == "pendentes/abc.pdf"
+    assert lido["valor"] == 2500.0 and lido["id_transacao"] == "E81zz"
+    assert lido["pagamento_existente"]["onde"] == "funcionário"
+
+
+def test_ler_das_confere_cnpj_e_acha_das_do_mes_lido(client, admin_headers, mocker, storage_ok):
+    mocker.patch("routes.funcionarios.leitura_documento.ler_boleto_das", return_value={
+        "valor": 75.9, "vencimento": "2026-10-20", "competencia": "2026-09-01", "cnpj": "99999999000199", "nome": "OUTRA"})
+    query = _db(mocker, {"FROM fin_funcionarios WHERE": [JOSIE], "AND tipo = %s": [LINHA_DAS]})
+    r = client.post(f"/api/funcionarios/{FUNC}/ler/das", data=_arquivo(), headers=admin_headers,
+                    content_type="multipart/form-data")
+    assert r.status_code == 200
+    lido = r.get_json()
+    assert lido["cnpj_confere"] is False
+    assert lido["competencia"] == "2026-09-01"
+    assert lido["das_existente"]["id"] == "l-2"
+    assert query.call_args.args[1] == (FUNC, "2026-09-01", "das")
+
+
+def test_ler_das_sem_cnpj_no_cadastro_nao_confere(client, admin_headers, mocker, storage_ok):
+    mocker.patch("routes.funcionarios.leitura_documento.ler_boleto_das", return_value={
+        "valor": 75.9, "vencimento": None, "competencia": None, "cnpj": "99999999000199", "nome": None})
+    _db(mocker, {"FROM fin_funcionarios WHERE": [{**JOSIE, "cnpj": None}]})
+    lido = client.post(f"/api/funcionarios/{FUNC}/ler/das", data=_arquivo(), headers=admin_headers,
+                       content_type="multipart/form-data").get_json()
+    assert lido["cnpj_confere"] is None and lido["das_existente"] is None
+
+
+def test_ler_nf_leitura_falhou_mantem_token(client, admin_headers, mocker, storage_ok):
+    import leitura_documento
+    mocker.patch("routes.funcionarios.leitura_documento.ler_nota_fiscal", side_effect=leitura_documento.LeituraFalhou("x"))
+    _db(mocker, {"FROM fin_funcionarios WHERE": [JOSIE]})
+    r = client.post(f"/api/funcionarios/{FUNC}/ler/nf", data=_arquivo("nf.png", "image/png", b"\x89PNG"),
+                    headers=admin_headers, content_type="multipart/form-data")
+    assert r.status_code == 200
+    lido = r.get_json()
+    assert lido["leitura_falhou"] is True and lido["arquivo_token"] == "pendentes/abc.pdf"
+    assert lido["numero"] is None and lido["nf_existente"] is None
+
+
+def test_ler_nf_ia_fora_503_e_nao_sobe_arquivo(client, admin_headers, mocker, storage_ok):
+    import leitura_documento
+    mocker.patch("routes.funcionarios.leitura_documento.ler_nota_fiscal", side_effect=leitura_documento.LeituraIndisponivel("x"))
+    enviar = mocker.patch("routes.funcionarios.storage.enviar_pendente")
+    _db(mocker, {"FROM fin_funcionarios WHERE": [JOSIE]})
+    r = client.post(f"/api/funcionarios/{FUNC}/ler/nf", data=_arquivo(), headers=admin_headers,
+                    content_type="multipart/form-data")
+    assert r.status_code == 503
+    enviar.assert_not_called()
+
+
+def test_ler_storage_falha_devolve_aviso(client, admin_headers, mocker):
+    import storage
+    mocker.patch("routes.funcionarios.storage.limpar_pendentes", return_value=0)
+    mocker.patch("routes.funcionarios.storage.enviar_pendente", side_effect=storage.StorageErro("fora"))
+    mocker.patch("routes.funcionarios.leitura_documento.ler_nota_fiscal", return_value={
+        "numero": "123", "valor": 2500.0, "data_emissao": "2026-09-05", "competencia": "2026-09-01",
+        "competencia_inferida": True, "cnpj_prestador": "12345678000195", "nome_prestador": "JOSIE"})
+    _db(mocker, {"FROM fin_funcionarios WHERE": [JOSIE], "AND tipo = %s": []})
+    lido = client.post(f"/api/funcionarios/{FUNC}/ler/nf", data=_arquivo(), headers=admin_headers,
+                       content_type="multipart/form-data").get_json()
+    assert lido["arquivo_token"] is None and "guardar" in lido["aviso"]
+    assert lido["cnpj_confere"] is True and lido["competencia_inferida"] is True
+
+
+def test_ler_arquivo_invalido_400(client, admin_headers, mocker):
+    _db(mocker, {"FROM fin_funcionarios WHERE": [JOSIE]})
+    r = client.post(f"/api/funcionarios/{FUNC}/ler/pix", data=_arquivo("a.gif", "image/gif", b"gif"),
+                    headers=admin_headers, content_type="multipart/form-data")
+    assert r.status_code == 400
+
+
+def test_ler_viewer_403(client, viewer_headers):
+    r = client.post(f"/api/funcionarios/{FUNC}/ler/pix", data=_arquivo(), headers=viewer_headers,
+                    content_type="multipart/form-data")
+    assert r.status_code == 403

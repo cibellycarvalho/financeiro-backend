@@ -511,3 +511,94 @@ def anexo_lancamento(fid, lid):
     if coluna is None:
         return _erro("qual deve ser arquivo, boleto ou comprovante")
     return anexos.url_anexo("fin_funcionario_lancamentos", "funcionario_id", fid, lid, coluna)
+
+
+# --- leitura por IA (só lê; gravar é no Salvar dela) --------------------------
+
+def _ler_e_guardar(leitor, rotulo):
+    """Lê o multipart com `leitor` e sobe para pendentes/.
+    Devolve (lido|None, token|None, aviso|None, resposta_de_erro|None)."""
+    dados, mime, erro = anexos.ler_arquivo_enviado()
+    if erro:
+        return None, None, None, erro
+    try:
+        lido = leitor(dados, mime)
+    except leitura_documento.LeituraIndisponivel as e:
+        print(f"[leitura_documento] indisponível ao ler {rotulo}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return None, None, None, (jsonify({"error": anexos.MSG_LEITURA_INDISPONIVEL}), 503)
+    except leitura_documento.LeituraFalhou as e:
+        print(f"[leitura_documento] falhou ao ler {rotulo}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        lido = None
+    # Guardar o arquivo é o acessório: se o Storage falhar, ela ainda lança o
+    # que a IA leu — só sem o anexo.
+    aviso = None
+    try:
+        token = anexos.subir_pendente(dados, mime)
+    except storage.StorageErro as e:
+        print(f"[storage] falhou ao guardar {rotulo}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        token = None
+        aviso = anexos.MSG_ANEXO_NAO_GUARDADO
+    return lido, token, aviso, None
+
+
+def _cnpj_confere(funcionario, cnpj_lido):
+    if not funcionario.get("cnpj") or not cnpj_lido:
+        return None
+    return funcionario["cnpj"] == cnpj_lido
+
+
+@bp.post("/<fid>/ler/pix")
+@require_auth
+@require_admin
+def ler_pix(fid):
+    if _funcionario(fid) is None:
+        return _erro("Funcionário não encontrado", 404)
+    lido, token, aviso, erro = _ler_e_guardar(leitura_documento.ler_comprovante, "comprovante")
+    if erro:
+        return erro
+    base = {"leitura_falhou": lido is None, "arquivo_token": token, "aviso": aviso,
+            "valor": None, "data_pagamento": None, "destinatario": None, "id_transacao": None,
+            "pagamento_existente": None}
+    if lido is None:
+        return jsonify(base)
+    return jsonify({**base, **lido,
+                    "pagamento_existente": _pix_ja_lancado(lido["id_transacao"]) if lido["id_transacao"] else None})
+
+
+@bp.post("/<fid>/ler/das")
+@require_auth
+@require_admin
+def ler_das(fid):
+    f = _funcionario(fid)
+    if f is None:
+        return _erro("Funcionário não encontrado", 404)
+    lido, token, aviso, erro = _ler_e_guardar(leitura_documento.ler_boleto_das, "boleto DAS")
+    if erro:
+        return erro
+    base = {"leitura_falhou": lido is None, "arquivo_token": token, "aviso": aviso,
+            "valor": None, "vencimento": None, "competencia": None, "cnpj": None, "nome": None,
+            "cnpj_confere": None, "das_existente": None}
+    if lido is None:
+        return jsonify(base)
+    existente = _um_por_mes(fid, lido["competencia"], "das") if lido["competencia"] else None
+    return jsonify({**base, **lido, "cnpj_confere": _cnpj_confere(f, lido["cnpj"]), "das_existente": existente})
+
+
+@bp.post("/<fid>/ler/nf")
+@require_auth
+@require_admin
+def ler_nf(fid):
+    f = _funcionario(fid)
+    if f is None:
+        return _erro("Funcionário não encontrado", 404)
+    lido, token, aviso, erro = _ler_e_guardar(leitura_documento.ler_nota_fiscal, "nota fiscal")
+    if erro:
+        return erro
+    base = {"leitura_falhou": lido is None, "arquivo_token": token, "aviso": aviso,
+            "numero": None, "valor": None, "data_emissao": None, "competencia": None,
+            "competencia_inferida": False, "cnpj_prestador": None, "nome_prestador": None,
+            "cnpj_confere": None, "nf_existente": None}
+    if lido is None:
+        return jsonify(base)
+    existente = _um_por_mes(fid, lido["competencia"], "nf") if lido["competencia"] else None
+    return jsonify({**base, **lido, "cnpj_confere": _cnpj_confere(f, lido["cnpj_prestador"]), "nf_existente": existente})
