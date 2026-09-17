@@ -487,3 +487,20 @@ def test_excluir_pagamento_fornecedor_inexistente_retorna_404(client, admin_head
             headers=admin_headers
         )
     assert resp.status_code == 404
+
+
+def test_pagamentos_do_periodo_traz_todos_os_fornecedores(client, admin_headers):
+    linha = {"id": "pg1", "fornecedor_id": "f1", "fornecedor_nome": "Flavia", "fornecedor_apelido": "FL",
+             "valor": 1000.00, "data_pagamento": "2026-09-15", "created_at": "2026-09-15T10:00:00"}
+    with patch("routes.fornecedores.db.query", return_value=[linha]) as mock_query:
+        resp = client.get("/api/fornecedores/pagamentos?de=2026-09-14&ate=2026-09-20", headers=admin_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()[0]["fornecedor_apelido"] == "FL"
+    sql, params = mock_query.call_args[0]
+    assert "JOIN fin_fornecedores" in sql
+    assert params == ("2026-09-14", "2026-09-20")
+
+
+def test_pagamentos_do_periodo_exige_datas_validas(client, admin_headers):
+    resp = client.get("/api/fornecedores/pagamentos?de=ontem&ate=2026-09-20", headers=admin_headers)
+    assert resp.status_code == 400

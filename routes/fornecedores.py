@@ -104,6 +104,29 @@ def listar():
     return jsonify(rows)
 
 
+@bp.get("/pagamentos")
+@require_auth
+def pagamentos_do_periodo():
+    """Pagamentos a qualquer fornecedor entre `de` e `ate` (inclusive).
+
+    A Caixa da Semana desconta da sobra o que foi pago a fornecedor na semana
+    — a Flávia e as compras lançadas com comprovante. Por fornecedor seria uma
+    chamada para cada um.
+    """
+    de, ate = request.args.get("de", ""), request.args.get("ate", "")
+    if not (re.fullmatch(r"\d{4}-\d{2}-\d{2}", de) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", ate)):
+        return jsonify({"error": "de e ate obrigatórios, no formato AAAA-MM-DD"}), 400
+    rows = db.query(
+        """SELECT pg.*, f.nome AS fornecedor_nome, f.apelido AS fornecedor_apelido
+           FROM fin_pagamentos_fornecedor pg
+           JOIN fin_fornecedores f ON f.id = pg.fornecedor_id
+           WHERE pg.data_pagamento BETWEEN %s AND %s
+           ORDER BY pg.data_pagamento, pg.created_at""",
+        (de, ate)
+    )
+    return jsonify(rows)
+
+
 @bp.get("/<fornecedor_id>/pedidos")
 @require_auth
 def listar_pedidos(fornecedor_id):
