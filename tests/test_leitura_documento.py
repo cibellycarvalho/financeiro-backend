@@ -133,3 +133,74 @@ def test_chamar_resposta_invalida_vira_leitura_falhou(monkeypatch, mocker):
     mocker.patch("leitura_documento.anthropic.Anthropic", return_value=client)
     with pytest.raises(ld.LeituraFalhou):
         ld._chamar(b"x", "image/png", "instrucao", {"type": "object"})
+
+
+# --- ler_boleto_das ---------------------------------------------------------
+
+def test_ler_boleto_das_normaliza_competencia_e_cnpj(mocker):
+    mocker.patch("leitura_documento._chamar", return_value=_fixture("leitura_das.json"))
+    lido = ld.ler_boleto_das(b"%PDF", "application/pdf")
+    assert lido == {
+        "valor": 75.9,
+        "vencimento": "2026-10-20",
+        "competencia": "2026-09-01",
+        "cnpj": "12345678000195",
+        "nome": "JOSIE DA SILVA 12345678000195",
+    }
+
+
+def test_ler_boleto_das_valor_zero_levanta_leitura_falhou(mocker):
+    dados = _fixture("leitura_das.json")
+    dados["valor"] = 0
+    mocker.patch("leitura_documento._chamar", return_value=dados)
+    with pytest.raises(ld.LeituraFalhou):
+        ld.ler_boleto_das(b"x", "image/png")
+
+
+def test_ler_boleto_das_competencia_ilegivel_vira_none(mocker):
+    dados = _fixture("leitura_das.json")
+    dados["competencia"] = "setembro"
+    dados["cnpj"] = "123"
+    mocker.patch("leitura_documento._chamar", return_value=dados)
+    lido = ld.ler_boleto_das(b"x", "image/png")
+    assert lido["competencia"] is None
+    assert lido["cnpj"] is None
+
+
+def test_competencia_ou_none_aceita_os_tres_formatos():
+    assert ld._competencia_ou_none("2026-09") == "2026-09-01"
+    assert ld._competencia_ou_none("2026-09-15") == "2026-09-01"
+    assert ld._competencia_ou_none("09/2026") == "2026-09-01"
+    assert ld._competencia_ou_none("13/2026") is None
+    assert ld._competencia_ou_none(None) is None
+
+
+# --- ler_nota_fiscal --------------------------------------------------------
+
+def test_ler_nota_fiscal_sem_competencia_usa_mes_da_emissao_e_marca(mocker):
+    mocker.patch("leitura_documento._chamar", return_value=_fixture("leitura_nf.json"))
+    lido = ld.ler_nota_fiscal(b"%PDF", "application/pdf")
+    assert lido["numero"] == "000000123"
+    assert lido["valor"] == 2500.0
+    assert lido["data_emissao"] == "2026-09-05"
+    assert lido["competencia"] == "2026-09-01"
+    assert lido["competencia_inferida"] is True
+    assert lido["cnpj_prestador"] == "12345678000195"
+
+
+def test_ler_nota_fiscal_com_competencia_na_nota_nao_infere(mocker):
+    dados = _fixture("leitura_nf.json")
+    dados["competencia"] = "08/2026"   # a NF de agosto do Fabrício, emitida em setembro
+    mocker.patch("leitura_documento._chamar", return_value=dados)
+    lido = ld.ler_nota_fiscal(b"%PDF", "application/pdf")
+    assert lido["competencia"] == "2026-08-01"
+    assert lido["competencia_inferida"] is False
+
+
+def test_ler_nota_fiscal_sem_numero_nem_valor_levanta_leitura_falhou(mocker):
+    dados = _fixture("leitura_nf.json")
+    dados["numero"] = None
+    dados["valor"] = None
+    mocker.patch("leitura_documento._chamar", return_value=dados)
+    with pytest.raises(ld.LeituraFalhou):
+        ld.ler_nota_fiscal(b"%PDF", "application/pdf")

@@ -1,4 +1,4 @@
-"""Leitura de pedido de compra e comprovante Pix por IA (visão).
+"""Leitura de pedido de compra, comprovante Pix, boleto DAS e nota fiscal por IA (visão).
 
 Regra de ouro: tudo que dá para calcular, não se pergunta ao modelo. A data do
 Pix Sicredi está no ID da transação; o total do pedido é a soma dos itens (a
@@ -76,8 +76,56 @@ INSTRUCAO_COMPROVANTE = (
     "ou E2E da transação exatamente como impresso."
 )
 
+ESQUEMA_DAS = {
+    "type": "object",
+    "properties": {
+        "valor": {"type": ["number", "null"], "description": "Valor total do documento, em reais"},
+        "vencimento": {"type": ["string", "null"], "description": "Data de vencimento, AAAA-MM-DD"},
+        "competencia": {"type": ["string", "null"],
+                        "description": "Período de apuração, AAAA-MM (o mês a que o imposto se refere)"},
+        "cnpj": {"type": ["string", "null"], "description": "CNPJ do contribuinte, só dígitos"},
+        "nome": {"type": ["string", "null"], "description": "Nome ou razão social do contribuinte"},
+    },
+    "required": ["valor", "vencimento", "competencia", "cnpj", "nome"],
+    "additionalProperties": False,
+}
+
+ESQUEMA_NF = {
+    "type": "object",
+    "properties": {
+        "numero": {"type": ["string", "null"], "description": "Número da nota, como impresso"},
+        "valor": {"type": ["number", "null"], "description": "Valor total dos serviços, em reais"},
+        "data_emissao": {"type": ["string", "null"], "description": "AAAA-MM-DD"},
+        "competencia": {"type": ["string", "null"],
+                        "description": "Mês dos serviços prestados (AAAA-MM), só se a nota disser; senão null"},
+        "cnpj_prestador": {"type": ["string", "null"], "description": "CNPJ de quem emitiu, só dígitos"},
+        "nome_prestador": {"type": ["string", "null"], "description": "Nome de quem emitiu, como impresso"},
+    },
+    "required": ["numero", "valor", "data_emissao", "competencia", "cnpj_prestador", "nome_prestador"],
+    "additionalProperties": False,
+}
+
+INSTRUCAO_DAS = (
+    "Este é um DAS (Documento de Arrecadação do Simples Nacional) de um MEI. "
+    "Transcreva: o valor total do documento em reais, a data de vencimento (AAAA-MM-DD), "
+    "o período de apuração (AAAA-MM — o mês a que o imposto se refere, que não é o mês "
+    "do vencimento), o CNPJ do contribuinte só com dígitos e o nome ou razão social. "
+    "Números no padrão brasileiro (75,90 = setenta e cinco reais e noventa centavos)."
+)
+
+INSTRUCAO_NF = (
+    "Esta é uma nota fiscal de serviço (NFS-e) emitida por um prestador MEI. Transcreva: "
+    "o número da nota, o valor total dos serviços em reais, a data de emissão (AAAA-MM-DD), "
+    "o CNPJ e o nome do PRESTADOR (quem emitiu, não o tomador), e o mês de competência dos "
+    "serviços (AAAA-MM) somente se a discriminação ou algum campo da nota disser em que mês "
+    "os serviços foram prestados — se não disser, deixe competencia nula. "
+    "Números no padrão brasileiro."
+)
+
 _RE_E2E = re.compile(r"^E\d{8}(\d{4})(\d{2})(\d{2})\d{6}")
 _RE_DATA = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_RE_COMPETENCIA = re.compile(r"^(\d{4})-(\d{2})(?:-\d{2})?$")
+_RE_COMPETENCIA_BR = re.compile(r"^(\d{2})/(\d{4})$")
 
 
 def data_do_id_transacao(id_transacao):
@@ -102,6 +150,38 @@ def _data_ou_none(texto):
     except ValueError:
         return None
     return texto
+
+
+def _competencia_ou_none(texto):
+    """'2026-09', '2026-09-15' ou '09/2026' → '2026-09-01'. O resto → None."""
+    if not isinstance(texto, str):
+        return None
+    t = texto.strip()
+    m = _RE_COMPETENCIA.match(t)
+    if m:
+        ano, mes = int(m.group(1)), int(m.group(2))
+    else:
+        m = _RE_COMPETENCIA_BR.match(t)
+        if not m:
+            return None
+        mes, ano = int(m.group(1)), int(m.group(2))
+    try:
+        return date(ano, mes, 1).isoformat()
+    except ValueError:
+        return None
+
+
+def _cnpj_ou_none(texto):
+    digitos = re.sub(r"\D", "", texto or "")
+    return digitos if len(digitos) == 14 else None
+
+
+def _valor_positivo_ou_none(v):
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
 
 
 def _bloco_arquivo(dados, mime):
@@ -187,4 +267,42 @@ def ler_comprovante(dados, mime):
         "data_pagamento": data_do_id_transacao(id_transacao) or _data_ou_none(bruto.get("data_pagamento")),
         "destinatario": (bruto.get("destinatario") or "").strip() or None,
         "id_transacao": id_transacao,
+    }
+
+
+def ler_boleto_das(dados, mime):
+    bruto = _chamar(dados, mime, INSTRUCAO_DAS, ESQUEMA_DAS)
+    valor = _valor_positivo_ou_none(bruto.get("valor"))
+    if valor is None:
+        raise LeituraFalhou("valor do DAS não legível")
+    return {
+        "valor": valor,
+        "vencimento": _data_ou_none(bruto.get("vencimento")),
+        "competencia": _competencia_ou_none(bruto.get("competencia")),
+        "cnpj": _cnpj_ou_none(bruto.get("cnpj")),
+        "nome": (bruto.get("nome") or "").strip() or None,
+    }
+
+
+def ler_nota_fiscal(dados, mime):
+    bruto = _chamar(dados, mime, INSTRUCAO_NF, ESQUEMA_NF)
+    numero = (bruto.get("numero") or "").strip() or None
+    valor = _valor_positivo_ou_none(bruto.get("valor"))
+    if numero is None and valor is None:
+        raise LeituraFalhou("nota sem número nem valor legíveis")
+    data_emissao = _data_ou_none(bruto.get("data_emissao"))
+    competencia = _competencia_ou_none(bruto.get("competencia"))
+    # A nota não diz o mês do serviço: assume o da emissão, e a tela avisa
+    # (é assim que a NF de agosto emitida em setembro pode ir para agosto).
+    inferida = competencia is None
+    if inferida and data_emissao:
+        competencia = data_emissao[:7] + "-01"
+    return {
+        "numero": numero,
+        "valor": valor,
+        "data_emissao": data_emissao,
+        "competencia": competencia,
+        "competencia_inferida": inferida,
+        "cnpj_prestador": _cnpj_ou_none(bruto.get("cnpj_prestador")),
+        "nome_prestador": (bruto.get("nome_prestador") or "").strip() or None,
     }
