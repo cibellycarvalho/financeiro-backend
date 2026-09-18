@@ -285,3 +285,34 @@ ganha a linha.
 - Aviso de DAS a vencer (a Caixa poderia listar "DAS da Josie vence quinta").
 - Relatório mensal para o contador (por pessoa: NF + DAS + comprovantes, zip ou PDF).
 - Reaproveitar aliases para sugerir o funcionário pelo destinatário do Pix.
+
+## Conferido no ar (18/09/2026)
+
+Migração aplicada no Supabase (`funcionarios`): 6 colunas em `fin_funcionarios`,
+15 em `fin_funcionario_lancamentos`, 4 índices próprios, 4 policies. Backend e
+frontend no ar (`main`).
+
+Smoke test feito na tela, com cadastro de teste apagado no fim:
+
+- Menu → **Funcionários** entre Fornecedores e Repasses ML; página abre com
+  "Nenhum funcionário cadastrado ainda."
+- "+ Novo funcionário" grava e o cartão aparece com o resumo do mês
+  ("Setembro 2026: falta: pagamento, DAS, NF"). Na primeira gravação a lista
+  demorou ~3 s para atualizar — era o primeiro acesso depois do deploy
+  (contêiner frio), não a tela.
+- Clicar no nome abre o mês com os **três blocos** e a lista dos 12 meses.
+- "+ lançar à mão" no pagamento já vem com o **valor combinado** (R$ 100,00) e a
+  data de **hoje no fuso de Brasília** (18/09/2026) — a correção do `hojeISO`
+  conferida em produção.
+- Salvar: o bloco passa a mostrar "R$ 100,00 · pago em 18/09/2026", o cabeçalho
+  vira "falta: DAS, NF", o cartão e a lista de meses acompanham.
+- **Caixa da Semana**: card "Pago a funcionários R$ 100,00 · TESTE CLAUDE
+  R$ 100,00" e a sobra recalculada —
+  `R$ 122.936,89 − R$ 4.476,04 de boletos − R$ 123.631,76 pagos − R$ 100,00 a
+  funcionários`.
+- 🗑️ no lançamento apaga e tudo volta a "falta: pagamento, DAS, NF".
+
+**Falta conferir com documento real:** a leitura por IA (`/ler/pix`, `/ler/das`,
+`/ler/nf`) não foi exercitada em produção — depende de um DAS e de uma NF da
+Cibelly. O caminho é o mesmo do upload de pedido de compra, que já roda desde
+09/09/2026 com a mesma chave e o mesmo bucket.
