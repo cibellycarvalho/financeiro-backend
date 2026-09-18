@@ -214,6 +214,11 @@ def pagamentos_do_periodo():
     de, ate = request.args.get("de", ""), request.args.get("ate", "")
     if not (_RE_DATA.match(de) and _RE_DATA.match(ate)):
         return _erro("de e ate obrigatórios, no formato AAAA-MM-DD")
+    try:
+        date.fromisoformat(de)
+        date.fromisoformat(ate)
+    except ValueError:
+        return _erro("de e ate obrigatórios, no formato AAAA-MM-DD")
     rows = db.query(
         """SELECT l.id, l.tipo, l.valor, l.pago_em AS data_pagamento, l.competencia, l.created_at,
                   f.nome AS funcionario_nome
@@ -230,6 +235,7 @@ def pagamentos_do_periodo():
         r["data_pagamento"] = _iso(r["data_pagamento"])
         r["competencia"] = _iso(r["competencia"])
         r["valor"] = float(r["valor"] or 0)
+        r["created_at"] = r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else r["created_at"]
         saida.append(r)
     return jsonify(saida)
 
@@ -317,6 +323,7 @@ def _pix_ja_lancado(id_transacao, ignorar_id=None):
     if ignorar_id:
         sql += " AND id <> %s"
         params.append(ignorar_id)
+    sql = f"SELECT * FROM ({sql}) AS u ORDER BY data_pagamento DESC NULLS LAST LIMIT 1"
     rows = db.query(sql, tuple(params))
     if not rows:
         return None
@@ -325,12 +332,15 @@ def _pix_ja_lancado(id_transacao, ignorar_id=None):
 
 
 def _msg_pix_repetido(existente):
+    valor, onde = existente["valor"], existente["onde"]
     quando = existente["data_pagamento"]
+    if not quando:
+        return f"Esse comprovante já foi lançado (R$ {valor:.2f}) — em {onde}"
     try:
         quando = date.fromisoformat(quando).strftime("%d/%m/%Y")
     except (TypeError, ValueError):
         pass
-    return f"Esse comprovante já foi lançado em {quando} (R$ {existente['valor']:.2f}) — em {existente['onde']}"
+    return f"Esse comprovante já foi lançado em {quando} (R$ {valor:.2f}) — em {onde}"
 
 
 def _um_por_mes(fid, competencia_iso, tipo, ignorar_id=None):

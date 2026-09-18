@@ -129,6 +129,11 @@ def test_pagamentos_do_periodo_exige_datas(client, admin_headers):
     assert client.get("/api/funcionarios/pagamentos?de=x&ate=2026-09-20", headers=admin_headers).status_code == 400
 
 
+def test_pagamentos_do_periodo_rejeita_data_com_formato_valido_mas_calendario_invalido(client, admin_headers):
+    r = client.get("/api/funcionarios/pagamentos?de=2026-13-40&ate=2026-09-20", headers=admin_headers)
+    assert r.status_code == 400
+
+
 # --- lançamentos --------------------------------------------------------------
 
 TOKEN = "pendentes/" + "0" * 32 + ".pdf"
@@ -230,6 +235,12 @@ def test_pix_repetido_em_qualquer_tabela_da_409(client, admin_headers, mocker):
     }, headers=admin_headers)
     assert r.status_code == 409
     assert "15/09/2026" in r.get_json()["error"] and "fornecedor" in r.get_json()["error"]
+
+
+def test_msg_pix_repetido_sem_data_nao_imprime_none():
+    from routes.funcionarios import _msg_pix_repetido
+    msg = _msg_pix_repetido({"id": "x", "data_pagamento": None, "valor": 10.0, "onde": "funcionário"})
+    assert "None" not in msg
 
 
 def test_storage_falha_ao_mover_nada_gravado(client, admin_headers, mocker):

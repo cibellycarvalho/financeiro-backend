@@ -1,5 +1,6 @@
 import re
 import sys
+from datetime import date
 
 from flask import Blueprint, request, jsonify, g
 import anexos
@@ -117,6 +118,11 @@ def pagamentos_do_periodo():
     """
     de, ate = request.args.get("de", ""), request.args.get("ate", "")
     if not (re.fullmatch(r"\d{4}-\d{2}-\d{2}", de) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", ate)):
+        return jsonify({"error": "de e ate obrigatórios, no formato AAAA-MM-DD"}), 400
+    try:
+        date.fromisoformat(de)
+        date.fromisoformat(ate)
+    except ValueError:
         return jsonify({"error": "de e ate obrigatórios, no formato AAAA-MM-DD"}), 400
     rows = db.query(
         """SELECT pg.*, f.nome AS fornecedor_nome, f.apelido AS fornecedor_apelido
