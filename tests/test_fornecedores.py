@@ -54,6 +54,43 @@ def test_list_pedidos_com_itens(client, admin_headers):
     assert body["itens"][0]["produto"] == "Cabo HDMI 8K 2M"
 
 
+def test_list_pedidos_traz_valor_amarrado(client, admin_headers):
+    """Fix round 1 (item 8): a tela de 'Pix sem compra' propõe amarrar o
+    valor_total inteiro de novo mesmo quando parte do pedido já está amarrada
+    a outro Pix. Precisa do saldo já amarrado para propor só o que falta."""
+    pedido_com_amarracao = {**PEDIDO_FIXTURE, "amarrado": 2000.00}
+    with patch("routes.fornecedores.db.query", return_value=[pedido_com_amarracao]):
+        resp = client.get(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos",
+            headers=admin_headers
+        )
+    assert resp.status_code == 200
+    assert resp.get_json()[0]["amarrado"] == 2000.00
+
+
+def test_list_pagamentos_traz_amarracoes(client, admin_headers):
+    """Fix round 1 (item 2, CRITICAL): depois de amarrar, o Pix precisa
+    continuar mostrando a que compras ficou amarrado — sem isso a única saída
+    pra corrigir um erro era apagar o pagamento inteiro e relançar."""
+    pagamento_amarrado = {
+        "id": "pg-1", "fornecedor_id": FORNECEDOR_FIXTURE["id"], "valor": 49310.00,
+        "data_pagamento": "2026-09-14", "arquivo_path": None,
+        "amarracoes": [
+            {"pedido_id": PEDIDO_FIXTURE["id"], "numero_pedido": "10",
+             "data_pedido": "2026-08-10", "valor": 30000.00},
+        ],
+    }
+    with patch("routes.fornecedores.db.query", return_value=[pagamento_amarrado]):
+        resp = client.get(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos",
+            headers=admin_headers
+        )
+    assert resp.status_code == 200
+    body = resp.get_json()[0]
+    assert body["amarracoes"][0]["numero_pedido"] == "10"
+    assert body["amarracoes"][0]["valor"] == 30000.00
+
+
 def test_create_pedido_com_itens(client, admin_headers):
     payload = {
         "data_pedido": "2026-08-01",

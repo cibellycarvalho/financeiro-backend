@@ -154,7 +154,13 @@ def listar_pedidos(fornecedor_id):
                           'valor_unitario', i.valor_unitario, 'valor_total', i.valor_total
                         ) ORDER BY i.created_at
                       ) FROM fin_pedido_itens i WHERE i.pedido_id = p.id), '[]'
-                   ) AS itens
+                   ) AS itens,
+                   -- Fix round 1 (item 8 da revisão): a tela de "Pix sem compra"
+                   -- precisa saber quanto já está amarrado a cada pedido, para
+                   -- não propor amarrar de novo o que outro Pix já cobriu.
+                   COALESCE(
+                     (SELECT SUM(lig.valor) FROM fin_pagamento_pedido lig WHERE lig.pedido_id = p.id), 0
+                   ) AS amarrado
             FROM fin_pedidos_fornecedor p
             WHERE p.fornecedor_id = %s
             ORDER BY p.data_pedido DESC""",
@@ -612,7 +618,24 @@ def desmarcar_pedido_pago(fornecedor_id, pedido_id):
 @require_auth
 def listar_pagamentos(fornecedor_id):
     rows = db.query(
-        "SELECT * FROM fin_pagamentos_fornecedor WHERE fornecedor_id = %s ORDER BY data_pagamento, created_at",
+        """SELECT pg.*,
+                   -- Fix round 1 (item 2 da revisão, CRITICAL): sem isto, depois de
+                   -- amarrar o Pix desaparece de "Pix sem compra" e nenhum lugar da
+                   -- tela mostra a que compra ele ficou amarrado — a única saída
+                   -- virava apagar o pagamento inteiro e relançar.
+                   COALESCE(
+                     (SELECT json_agg(
+                        json_build_object(
+                          'pedido_id', lig.pedido_id, 'numero_pedido', ped.numero_pedido,
+                          'data_pedido', ped.data_pedido, 'valor', lig.valor
+                        ) ORDER BY ped.data_pedido
+                      ) FROM fin_pagamento_pedido lig
+                        JOIN fin_pedidos_fornecedor ped ON ped.id = lig.pedido_id
+                        WHERE lig.pagamento_id = pg.id), '[]'
+                   ) AS amarracoes
+            FROM fin_pagamentos_fornecedor pg
+            WHERE pg.fornecedor_id = %s
+            ORDER BY pg.data_pagamento, pg.created_at""",
         (fornecedor_id,)
     )
     return jsonify(rows)
