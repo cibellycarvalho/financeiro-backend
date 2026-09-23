@@ -78,6 +78,17 @@ def url_assinada(caminho: str, segundos: int = 3600) -> str:
     return f"{_base()}{resp.json()['signedURL']}"
 
 
+def baixar(caminho: str) -> bytes:
+    """Conteúdo do arquivo. Usado para montar o pacote do mês."""
+    resp = requests.get(
+        f"{_base()}/object/{BUCKET}/{caminho}",
+        headers=_headers(),
+        timeout=60,
+    )
+    _checar(resp, "baixar arquivo")
+    return resp.content
+
+
 def limpar_pendentes(agora: datetime | None = None) -> int:
     """Apaga o que ficou em pendentes/ há mais de 24 h (upload sem salvar).
 
