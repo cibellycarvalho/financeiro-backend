@@ -3,6 +3,7 @@ import sys
 from datetime import date
 
 from flask import Blueprint, request, jsonify, g
+import amarracao
 import anexos
 from anexos import MSG_LEITURA_INDISPONIVEL, MSG_ANEXO_NAO_GUARDADO
 import db
@@ -543,6 +544,11 @@ def marcar_pedido_pago(fornecedor_id, pedido_id):
                 (fornecedor_id, valor, data_pagamento, pedido_id, g.user["user_id"])
             )
             pagamento = dict(cur.fetchone())
+            cur.execute(
+                """INSERT INTO fin_pagamento_pedido (pagamento_id, pedido_id, valor)
+                   VALUES (%s, %s, %s)""",
+                (pagamento["id"], pedido_id, valor),
+            )
             cur.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s RETURNING *",
                         (data_pagamento, pedido_id))
             atualizado = dict(cur.fetchone())
@@ -576,6 +582,11 @@ def desmarcar_pedido_pago(fornecedor_id, pedido_id):
         cur.execute("DELETE FROM fin_pagamentos_fornecedor WHERE pedido_id = %s AND fornecedor_id = %s",
                     (pedido_id, fornecedor_id))
         cur.execute("UPDATE fin_pedidos_fornecedor SET pago_em = NULL WHERE id = %s", (pedido_id,))
+        # A FK de fin_pagamento_pedido já é ON DELETE CASCADE (o DELETE acima
+        # cuida da ligação com o pagamento apagado); isto aqui limpa a ligação
+        # de outros pagamentos que continuam existindo mas apontavam pra este
+        # pedido (amarração parcial de mais de um Pix).
+        cur.execute("DELETE FROM fin_pagamento_pedido WHERE pedido_id = %s", (pedido_id,))
     return "", 204
 
 
@@ -587,6 +598,62 @@ def listar_pagamentos(fornecedor_id):
         (fornecedor_id,)
     )
     return jsonify(rows)
+
+
+@bp.get("/<fornecedor_id>/pagamentos/soltos")
+@require_auth
+def pagamentos_soltos(fornecedor_id):
+    """Pix daquele fornecedor que ainda não dizem qual compra pagaram."""
+    rows = db.query(
+        """SELECT pg.id, pg.valor, pg.data_pagamento, pg.arquivo_path
+           FROM fin_pagamentos_fornecedor pg
+           WHERE pg.fornecedor_id = %s
+             AND NOT EXISTS (SELECT 1 FROM fin_pagamento_pedido lig WHERE lig.pagamento_id = pg.id)
+           ORDER BY pg.data_pagamento DESC""",
+        (fornecedor_id,),
+    )
+    return jsonify(rows)
+
+
+@bp.post("/<fornecedor_id>/pagamentos/<pagamento_id>/pedidos")
+@require_auth
+@require_admin
+def amarrar_pagamento(fornecedor_id, pagamento_id):
+    if not db.query(
+        "SELECT id FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pagamento_id, fornecedor_id),
+    ):
+        return jsonify({"error": "Pagamento não encontrado"}), 404
+
+    itens = (request.get_json() or {}).get("itens")
+    if not isinstance(itens, list):
+        return jsonify({"error": "itens obrigatório (lista)"}), 400
+
+    with db.transaction() as cur:
+        erro = amarracao.validar(cur, pagamento_id, itens)
+        if erro:
+            return jsonify({"error": erro}), 400
+        cur.execute("DELETE FROM fin_pagamento_pedido WHERE pagamento_id = %s", (pagamento_id,))
+        for item in itens:
+            cur.execute(
+                """INSERT INTO fin_pagamento_pedido (pagamento_id, pedido_id, valor)
+                   VALUES (%s, %s, %s)""",
+                (pagamento_id, item["pedido_id"], float(item["valor"])),
+            )
+    return jsonify({"itens": itens})
+
+
+@bp.delete("/<fornecedor_id>/pagamentos/<pagamento_id>/pedidos")
+@require_auth
+@require_admin
+def desamarrar_pagamento(fornecedor_id, pagamento_id):
+    if not db.query(
+        "SELECT id FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pagamento_id, fornecedor_id),
+    ):
+        return jsonify({"error": "Pagamento não encontrado"}), 404
+    db.execute("DELETE FROM fin_pagamento_pedido WHERE pagamento_id = %s", (pagamento_id,))
+    return "", 204
 
 
 @bp.post("/<fornecedor_id>/pagamentos/ler")
@@ -701,6 +768,11 @@ def registrar_pagamento(fornecedor_id):
     if pedido_id:
         db.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s",
                    (data["data_pagamento"], pedido_id))
+        db.execute(
+            """INSERT INTO fin_pagamento_pedido (pagamento_id, pedido_id, valor)
+               VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
+            (row["id"], pedido_id, valor),
+        )
 
     # O pagamento já está gravado: o alias vale mesmo que o anexo falhe abaixo.
     _aprender_alias_silencioso(fornecedor_id, alias_destinatario, "destinatario")
