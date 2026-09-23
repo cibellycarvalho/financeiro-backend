@@ -684,16 +684,59 @@ def amarrar_pagamento(fornecedor_id, pagamento_id):
     return jsonify({"itens": itens})
 
 
+def _limpar_pago_em_orfao(cur, pedido_ids, ignorar_pagamento=None):
+    """Tira o `pago_em` das compras que ficaram sem nenhuma baixa.
+
+    "Sem baixa" é: nenhuma linha em fin_pagamento_pedido E nenhum pagamento
+    legado apontando pela coluna `pedido_id`. Uma compra quitada por outro
+    Pix continua paga — era o bug do IMPORTANT 4.
+    """
+    for pedido_id in dict.fromkeys(p for p in pedido_ids if p):
+        cur.execute(
+            """UPDATE fin_pedidos_fornecedor SET pago_em = NULL
+               WHERE id = %s
+                 AND NOT EXISTS (SELECT 1 FROM fin_pagamento_pedido lig
+                                 WHERE lig.pedido_id = %s)
+                 AND NOT EXISTS (SELECT 1 FROM fin_pagamentos_fornecedor pg
+                                 WHERE pg.pedido_id = %s AND (%s IS NULL OR pg.id <> %s))""",
+            (pedido_id, pedido_id, pedido_id, ignorar_pagamento, ignorar_pagamento),
+        )
+
+
 @bp.delete("/<fornecedor_id>/pagamentos/<pagamento_id>/pedidos")
 @require_auth
 @require_admin
 def desamarrar_pagamento(fornecedor_id, pagamento_id):
-    if not db.query(
-        "SELECT id FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+    """Desfaz as amarrações do Pix — e apaga o rastro que a coluna legada deixa.
+
+    Fix round 3 (CRITICAL 1): apagar só as linhas de fin_pagamento_pedido
+    deixava `fin_pagamentos_fornecedor.pedido_id` apontando para a compra e o
+    `pago_em` dela preenchido. Depois disso, desmarcar a caixinha "Pago"
+    daquela compra roda DELETE ... WHERE pedido_id = ... e apaga o Pix
+    INTEIRO — levando por CASCADE as amarrações de outras compras e deixando
+    o comprovante órfão; a Caixa da Semana mostra a dívida de volta.
+
+    Por isso, além de apagar os links: limpa a coluna legada do pagamento e
+    tira o `pago_em` das compras que ficaram sem nenhuma amarração (e sem
+    outro pagamento legado apontando para elas).
+    """
+    linhas = db.query(
+        "SELECT id, pedido_id FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
         (pagamento_id, fornecedor_id),
-    ):
+    )
+    if not linhas:
         return jsonify({"error": "Pagamento não encontrado"}), 404
-    db.execute("DELETE FROM fin_pagamento_pedido WHERE pagamento_id = %s", (pagamento_id,))
+
+    with db.transaction() as cur:
+        cur.execute("SELECT pedido_id FROM fin_pagamento_pedido WHERE pagamento_id = %s",
+                    (pagamento_id,))
+        afetados = [r["pedido_id"] for r in (cur.fetchall() or [])]
+        if linhas[0].get("pedido_id"):
+            afetados.append(linhas[0]["pedido_id"])
+        cur.execute("DELETE FROM fin_pagamento_pedido WHERE pagamento_id = %s", (pagamento_id,))
+        cur.execute("UPDATE fin_pagamentos_fornecedor SET pedido_id = NULL WHERE id = %s",
+                    (pagamento_id,))
+        _limpar_pago_em_orfao(cur, afetados)
     return "", 204
 
 
@@ -891,6 +934,16 @@ def editar_pagamento(fornecedor_id, pagamento_id):
 @require_auth
 @require_admin
 def excluir_pagamento(fornecedor_id, pagamento_id):
+    """Apaga o Pix e devolve à dívida só as compras que ficaram sem baixa.
+
+    Fix round 3 (IMPORTANT 4): a limpeza olhava só a coluna legada
+    `pedido_id`. Um Pix amarrado a duas compras deixava as duas marcadas
+    como pagas sem pagamento nenhum, e um Pix legado podia limpar o
+    `pago_em` de uma compra que outro Pix já tinha quitado. A limpeza agora
+    sai dos links (mais a coluna legada, que ainda existe) e só zera
+    `pago_em` de compra que ficou sem nenhuma amarração e sem outro
+    pagamento legado apontando para ela.
+    """
     pagamentos = db.query(
         "SELECT id, pedido_id FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
         (pagamento_id, fornecedor_id)
@@ -898,14 +951,16 @@ def excluir_pagamento(fornecedor_id, pagamento_id):
     if not pagamentos:
         return jsonify({"error": "Pagamento não encontrado"}), 404
 
-    db.execute(
-        "DELETE FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
-        (pagamento_id, fornecedor_id)
-    )
-    # Apagou o pagamento que a caixinha lançou: o pedido volta a estar em aberto.
-    if pagamentos[0].get("pedido_id"):
-        db.execute("UPDATE fin_pedidos_fornecedor SET pago_em = NULL WHERE id = %s",
-                   (pagamentos[0]["pedido_id"],))
+    with db.transaction() as cur:
+        cur.execute("SELECT pedido_id FROM fin_pagamento_pedido WHERE pagamento_id = %s",
+                    (pagamento_id,))
+        afetados = [r["pedido_id"] for r in (cur.fetchall() or [])]
+        if pagamentos[0].get("pedido_id"):
+            afetados.append(pagamentos[0]["pedido_id"])
+        # O CASCADE da FK já leva as linhas de fin_pagamento_pedido junto.
+        cur.execute("DELETE FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+                    (pagamento_id, fornecedor_id))
+        _limpar_pago_em_orfao(cur, afetados, ignorar_pagamento=pagamento_id)
     return "", 204
 
 

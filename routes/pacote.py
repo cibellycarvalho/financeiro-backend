@@ -41,10 +41,18 @@ def _compras_do_mes(inicio, fim):
            ORDER BY f.nome, p.data_pedido, p.id""",
         (inicio, fim),
     )
+    # Fix round 3 (IMPORTANT 3): a tela de Contas a Pagar mostra os clipes de
+    # nota e comprovante em TODAS as contas, não só nas de categoria
+    # FORNECEDOR. Filtrar por categoria aqui fazia o arquivo que ela anexou
+    # numa conta de imposto nunca aparecer no pacote, sem aviso nenhum.
+    # Entra no pacote toda conta do mês que tenha algum arquivo anexado,
+    # qualquer categoria — mais as de FORNECEDOR, que continuam entrando
+    # mesmo sem arquivo, porque elas são compras e a linha do resumo é o que
+    # mostra o que falta. A categoria vai junto na linha.
     contas = db.query(
         """SELECT c.id, 'CONTAS A PAGAR' AS fornecedor, c.vencimento AS data_compra,
                   c.descricao AS numero_pedido, c.valor, c.nf_path,
-                  NULL AS pedido_path,
+                  NULL AS pedido_path, c.categoria,
                   (c.status = 'pago') AS pago, 'conta a pagar' AS origem,
                   CASE WHEN c.comprovante_path IS NOT NULL
                        THEN json_build_array(json_build_object(
@@ -53,7 +61,10 @@ def _compras_do_mes(inicio, fim):
                               'valor', c.valor))
                        ELSE '[]' END AS comprovantes
            FROM fin_contas_pagar c
-           WHERE c.categoria = 'FORNECEDOR' AND c.vencimento BETWEEN %s AND %s
+           WHERE c.vencimento BETWEEN %s AND %s
+             AND (c.categoria = 'FORNECEDOR'
+                  OR c.nf_path IS NOT NULL
+                  OR c.comprovante_path IS NOT NULL)
            ORDER BY c.vencimento, c.id""",
         (inicio, fim),
     )

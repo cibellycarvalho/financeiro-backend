@@ -76,7 +76,8 @@ def test_cabecalho_tem_data_compra_ou_vencimento_e_origem():
     cabecalho = list(planilha.active.values)[0]
     assert cabecalho == (
         "Fornecedor", "Data (compra ou vencimento)", "Nº do pedido", "Valor", "Pago",
-        "Pagamentos", "Em aberto", "Tem nota", "Tem comprovante", "Origem",
+        "Pagamentos", "Em aberto", "Marcada como paga", "Tem nota", "Tem comprovante",
+        "Origem", "Categoria",
     )
 
 
@@ -183,39 +184,66 @@ def test_falha_de_rede_no_download_vira_bilhete_faltou():
 
 # --- Compra paga sem amarração de Pix (Fix round 1, item 4/5) --------------
 
-def test_pedido_pago_sem_amarracao_aparece_pago_no_resumo():
+def _linha(compra):
+    conteudo = pacote_zip.montar([compra])
+    with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
+        planilha = openpyxl.load_workbook(io.BytesIO(z.read("resumo.xlsx")))
+    return list(planilha.active.values)[1]
+
+
+def test_pedido_marcado_como_pago_sem_link_nao_vira_dinheiro_no_resumo():
+    """Fix round 3 (CRITICAL 2b): o mesmo dinheiro contava duas vezes.
+
+    A compra com `pago_em` e sem link entrava como paga; o Pix que a pagou
+    continuava solto e, amarrado a outra compra, a mesma quantia aparecia de
+    novo lá. "Pago" passa a ser só a soma dos links; a marcação manual vira
+    uma coluna à parte.
+    """
     paga_sem_pix = dict(COMPRA, comprovantes=[], pago_em="2026-08-20")
-    conteudo = pacote_zip.montar([paga_sem_pix])
-    with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
-        planilha = openpyxl.load_workbook(io.BytesIO(z.read("resumo.xlsx")))
-    linhas = list(planilha.active.values)
-    linha = linhas[1]
-    # Pago == Valor, Em aberto == 0, mas não existe arquivo de comprovante.
-    assert linha[4] == linha[3] == 30000.0
+    linha = _linha(paga_sem_pix)
+    assert linha[4] == 0.0            # Pago = soma dos links = 0
+    assert linha[6] == 30000.0        # Em aberto continua cheio
+    assert linha[7] == "sim"          # Marcada como paga
+    assert linha[9] == "não"          # Tem comprovante
+
+
+def test_compra_com_link_conta_o_dinheiro_uma_vez_so():
+    com_link = dict(COMPRA, pago_em="2026-08-20")
+    with patch("storage.baixar", return_value=b"%PDF"):
+        linha = _linha(com_link)
+    assert linha[4] == 30000.0
     assert linha[6] == 0.0
-    assert linha[8] == "não"
+    assert linha[7] == "sim"
+    assert linha[9] == "sim"
 
 
-def test_conta_a_pagar_paga_sem_comprovante_aparece_paga_no_resumo():
+def test_conta_a_pagar_paga_sem_comprovante_aparece_marcada_nao_paga():
     conta = dict(COMPRA, comprovantes=[], pago=True, origem="conta a pagar")
-    conteudo = pacote_zip.montar([conta])
-    with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
-        planilha = openpyxl.load_workbook(io.BytesIO(z.read("resumo.xlsx")))
-    linha = list(planilha.active.values)[1]
-    assert linha[4] == linha[3] == 30000.0
-    assert linha[6] == 0.0
-    assert linha[8] == "não"
-    assert linha[9] == "conta a pagar"
-
-
-def test_conta_a_pagar_nao_paga_continua_em_aberto():
-    conta = dict(COMPRA, comprovantes=[], pago=False, origem="conta a pagar")
-    conteudo = pacote_zip.montar([conta])
-    with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
-        planilha = openpyxl.load_workbook(io.BytesIO(z.read("resumo.xlsx")))
-    linha = list(planilha.active.values)[1]
+    linha = _linha(conta)
     assert linha[4] == 0.0
     assert linha[6] == 30000.0
+    assert linha[7] == "sim"
+    assert linha[9] == "não"
+    assert linha[10] == "conta a pagar"
+
+
+def test_conta_a_pagar_nao_paga_continua_em_aberto_e_sem_marcacao():
+    conta = dict(COMPRA, comprovantes=[], pago=False, origem="conta a pagar")
+    linha = _linha(conta)
+    assert linha[4] == 0.0
+    assert linha[6] == 30000.0
+    assert linha[7] == "não"
+
+
+def test_conta_de_outra_categoria_mostra_a_categoria_na_linha():
+    conta = dict(COMPRA, fornecedor="CONTAS A PAGAR", numero_pedido="DAS setembro",
+                 comprovantes=[], pedido_path=None, pago=True,
+                 origem="conta a pagar", categoria="IMPOSTO_DAS")
+    with patch("storage.baixar", return_value=b"%PDF"):
+        linha = _linha(conta)
+    assert linha[8] == "sim"                 # nota anexada entrou no zip
+    assert linha[10] == "conta a pagar"      # Origem continua existindo
+    assert linha[11] == "IMPOSTO_DAS"
 
 
 # --- Extensão desconhecida e arredondamento (Fix round 1, item 9/10) -------
@@ -249,6 +277,93 @@ def test_em_aberto_arredonda_residuo_de_ponto_flutuante():
     assert linha[6] == 0.0
 
 
+# --- Resumo marca o arquivo que não entrou (Fix round 3, IMPORTANT 1) ------
+
+
+def test_resumo_diz_que_a_nota_faltou_baixar_quando_vira_bilhete():
+    import storage as st
+    with patch("storage.baixar", side_effect=st.StorageErro("sumiu")):
+        conteudo = pacote_zip.montar([COMPRA])
+    with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
+        nomes = z.namelist()
+        planilha = openpyxl.load_workbook(io.BytesIO(z.read("resumo.xlsx")))
+    linha = list(planilha.active.values)[1]
+    assert any("FALTOU nota-fiscal.pdf.txt" in n for n in nomes)
+    assert linha[8] == "sim (faltou baixar)"      # Tem nota
+    assert linha[9] == "sim (faltou baixar)"      # Tem comprovante
+
+
+def test_resumo_diz_sim_limpo_quando_baixou_tudo():
+    with patch("storage.baixar", return_value=b"%PDF"):
+        conteudo = pacote_zip.montar([COMPRA])
+    with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
+        planilha = openpyxl.load_workbook(io.BytesIO(z.read("resumo.xlsx")))
+    linha = list(planilha.active.values)[1]
+    assert linha[8] == "sim"
+    assert linha[9] == "sim"
+
+
+# --- Download em paralelo (Fix round 3, CRITICAL 3) -----------------------
+
+
+def test_paralelizacao_preserva_conteudo_e_ordem_das_pastas():
+    """Cada arquivo do zip tem o conteúdo do SEU path, não o do vizinho —
+    as respostas chegam fora de ordem quando os downloads são concorrentes."""
+    import time
+
+    def baixar_fora_de_ordem(path):
+        # O primeiro da fila é o mais lento: se o resultado fosse casado por
+        # ordem de chegada em vez de por path, os conteúdos se trocariam.
+        time.sleep(0.05 if path.endswith("ped-1.pdf") and "notas" in path else 0)
+        return path.encode()
+
+    compra = dict(COMPRA)
+    with patch("storage.baixar", side_effect=baixar_fora_de_ordem):
+        conteudo = pacote_zip.montar([compra])
+    with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
+        assert z.read("FLAVIA/17-08 pedido 1234/nota-fiscal.pdf") == b"forn/notas/ped-1.pdf"
+        assert z.read("FLAVIA/17-08 pedido 1234/pedido.pdf") == b"forn/pedidos/ped-1.pdf"
+        assert z.read("FLAVIA/17-08 pedido 1234/comprovante 22-09 R$ 30.000,00.pdf") == b"forn/pagamentos/pg-1.pdf"
+
+
+def test_uma_falha_no_paralelo_nao_derruba_os_outros_arquivos():
+    def baixar(path):
+        if "notas" in path:
+            raise storage.StorageErro("sumiu")
+        return b"%PDF"
+
+    with patch("storage.baixar", side_effect=baixar):
+        conteudo = pacote_zip.montar([COMPRA])
+    nomes = _nomes(conteudo)
+    assert any(n.endswith("FALTOU nota-fiscal.pdf.txt") for n in nomes)
+    assert "FLAVIA/17-08 pedido 1234/pedido.pdf" in nomes
+    assert "FLAVIA/17-08 pedido 1234/comprovante 22-09 R$ 30.000,00.pdf" in nomes
+
+
+def test_comprovante_repetido_em_duas_compras_e_baixado_uma_vez_so():
+    chamadas = []
+
+    def contar(path):
+        chamadas.append(path)
+        return b"%PDF"
+
+    a = dict(COMPRA, numero_pedido="10", nf_path=None, pedido_path=None)
+    b = dict(COMPRA, numero_pedido="11", nf_path=None, pedido_path=None)
+    with patch("storage.baixar", side_effect=contar):
+        nomes = _nomes(pacote_zip.montar([a, b]))
+    assert chamadas.count("forn/pagamentos/pg-1.pdf") == 1
+    assert "FLAVIA/17-08 pedido 10/comprovante 22-09 R$ 30.000,00.pdf" in nomes
+    assert "FLAVIA/17-08 pedido 11/comprovante 22-09 R$ 30.000,00.pdf" in nomes
+
+
+def test_baixa_em_paralelo_com_poucos_workers():
+    assert 4 <= pacote_zip.BAIXAR_EM_PARALELO <= 8
+    with patch("pacote_zip.ThreadPoolExecutor", wraps=pacote_zip.ThreadPoolExecutor) as exec_mock:
+        with patch("storage.baixar", return_value=b"%PDF"):
+            pacote_zip.montar([COMPRA])
+    assert exec_mock.call_args.kwargs["max_workers"] == 3   # 3 paths distintos
+
+
 # --- Pasta vazia grava o bit de diretório (Fix round 1, item 11) -----------
 
 def test_pasta_vazia_e_marcada_como_diretorio_de_verdade():
@@ -271,6 +386,40 @@ def test_rota_devolve_zip(client, admin_headers):
     assert "compras-2026-08.zip" in resp.headers["Content-Disposition"]
 
 
+def test_query_do_mes_inclui_conta_de_qualquer_categoria_com_anexo(mocker):
+    """Fix round 3 (IMPORTANT 3): a tela mostra os clipes em TODAS as contas.
+    Filtrar por categoria = FORNECEDOR fazia a nota anexada numa conta de
+    imposto nunca aparecer no pacote, sem aviso."""
+    query_mock = mocker.patch("routes.pacote.db.query", return_value=[])
+    import routes.pacote as rp
+    rp._compras_do_mes("2026-09-01", "2026-09-30")
+    sql_contas = query_mock.call_args_list[1].args[0]
+    assert "c.nf_path IS NOT NULL" in sql_contas
+    assert "c.comprovante_path IS NOT NULL" in sql_contas
+    assert "c.categoria" in sql_contas
+    assert "WHERE c.categoria = 'FORNECEDOR' AND" not in sql_contas
+
+
+def test_conta_imposto_das_com_nota_entra_no_zip(client, admin_headers):
+    linhas = [{
+        "fornecedor": "CONTAS A PAGAR", "data_compra": "2026-09-21",
+        "numero_pedido": "DAS setembro", "valor": 1200.0,
+        "nf_path": "contas/notas/das.pdf", "pedido_path": None,
+        "pago": True, "origem": "conta a pagar", "categoria": "IMPOSTO_DAS",
+        "comprovantes": [],
+    }]
+    with patch("routes.pacote._compras_do_mes", return_value=linhas), \
+         patch("storage.baixar", return_value=b"%PDF"):
+        resp = client.get("/api/pacote/compras/2026-09", headers=admin_headers)
+    assert resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(resp.data)) as z:
+        assert "CONTAS A PAGAR/21-09 pedido DAS setembro/nota-fiscal.pdf" in z.namelist()
+        planilha = openpyxl.load_workbook(io.BytesIO(z.read("resumo.xlsx")))
+    linha = list(planilha.active.values)[1]
+    assert linha[10] == "conta a pagar"
+    assert linha[11] == "IMPOSTO_DAS"
+
+
 def test_mes_sem_compra_avisa_em_vez_de_zip_vazio(client, admin_headers):
     with patch("routes.pacote._compras_do_mes", return_value=[]):
         resp = client.get("/api/pacote/compras/2026-08", headers=admin_headers)
@@ -286,3 +435,13 @@ def test_mes_em_formato_errado_da_400(client, admin_headers):
 def test_ano_fora_do_intervalo_da_400(client, admin_headers):
     resp = client.get("/api/pacote/compras/0000-01", headers=admin_headers)
     assert resp.status_code == 400
+
+
+# --- Timeout do gunicorn (Fix round 3, CRITICAL 3) ------------------------
+
+def test_dockerfile_da_tempo_do_zip_do_mes_ficar_pronto():
+    """Com os 30 s padrão, montar o mês (≈90 downloads do Storage) mata o
+    worker e a tela mostra erro sem mensagem."""
+    from pathlib import Path
+    texto = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text()
+    assert '"--timeout", "300"' in texto

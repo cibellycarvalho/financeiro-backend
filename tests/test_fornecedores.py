@@ -546,15 +546,17 @@ def test_editar_pagamento_fornecedor_inexistente_retorna_404(client, admin_heade
 
 
 def test_excluir_pagamento_fornecedor(client, admin_headers):
-    with patch("routes.fornecedores.db.query", return_value=[{"id": "pg1"}]), \
-         patch("routes.fornecedores.db.execute") as mock_execute:
+    mock_transaction, mock_cur = _mock_transaction_cursor([])
+    mock_cur.fetchall.return_value = []
+    with patch("routes.fornecedores.db.query", return_value=[{"id": "pg1", "pedido_id": None}]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
         resp = client.delete(
             f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos/pg1",
             headers=admin_headers
         )
     assert resp.status_code == 204
-    delete_sql = mock_execute.call_args[0][0]
-    assert "DELETE FROM fin_pagamentos_fornecedor" in delete_sql
+    sqls = [c[0][0] for c in mock_cur.execute.call_args_list]
+    assert any("DELETE FROM fin_pagamentos_fornecedor" in s for s in sqls)
 
 
 def test_excluir_pagamento_fornecedor_inexistente_retorna_404(client, admin_headers):

@@ -18,9 +18,15 @@ CREATE TABLE IF NOT EXISTS fin_pagamento_pedido (
 CREATE INDEX IF NOT EXISTS idx_pagamento_pedido_pedido ON fin_pagamento_pedido(pedido_id);
 
 -- As amarrações que já existem na coluna antiga passam para a tabela.
+-- LEAST(pg.valor, p.valor_total): um Pix maior que a compra (adiantamento,
+-- ou um Pix que pagou mais de uma e ficou preso a uma só na coluna antiga)
+-- gravaria um link maior que a própria compra, que é justamente o que
+-- amarracao.validar recusa. Conferido em 23/09/2026: nenhuma linha do banco
+-- está nesse caso hoje — isto é para quem rodar a migração de novo.
 INSERT INTO fin_pagamento_pedido (pagamento_id, pedido_id, valor)
-SELECT pg.id, pg.pedido_id, pg.valor
+SELECT pg.id, pg.pedido_id, LEAST(pg.valor, p.valor_total)
 FROM fin_pagamentos_fornecedor pg
+JOIN fin_pedidos_fornecedor p ON p.id = pg.pedido_id
 WHERE pg.pedido_id IS NOT NULL
 ON CONFLICT DO NOTHING;
 
