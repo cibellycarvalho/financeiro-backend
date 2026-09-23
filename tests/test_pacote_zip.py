@@ -132,6 +132,46 @@ def test_duas_compras_duplicadas_sem_id_ainda_assim_nao_se_pisam():
     assert len(pastas) == 2
 
 
+def test_montar_e_deterministico_mesma_lista_da_as_mesmas_pastas():
+    # A mesma lista, montada duas vezes, tem que sair idêntica — o desempate
+    # não pode depender de nada além da ordem da lista recebida.
+    a = dict(COMPRA, id="aaaaaa11", numero_pedido=None, comprovantes=[])
+    b = dict(COMPRA, id="bbbbbb22", numero_pedido=None, comprovantes=[])
+    compras = [a, b]
+    pastas1 = sorted(n.rsplit("/", 1)[0] for n in _nomes(pacote_zip.montar(compras)) if n != "resumo.xlsx")
+    pastas2 = sorted(n.rsplit("/", 1)[0] for n in _nomes(pacote_zip.montar(compras)) if n != "resumo.xlsx")
+    assert pastas1 == pastas2
+
+
+def test_quem_fica_sem_sufixo_depende_da_ordem_da_lista():
+    # Por isso a query em routes/pacote.py precisa de ORDER BY estável (com
+    # id no fim): montar() em si é determinístico, mas decide "quem é o
+    # primeiro" pela ordem em que a lista chega — se o Postgres mandar a
+    # lista em ordem diferente a cada vez, a pasta sem sufixo troca de dona.
+    a = dict(COMPRA, id="aaaaaa11", numero_pedido=None, comprovantes=[])
+    b = dict(COMPRA, id="bbbbbb22", numero_pedido=None, comprovantes=[])
+    with patch("storage.baixar", return_value=b"%PDF"):
+        nomes_ab = _nomes(pacote_zip.montar([a, b]))
+        nomes_ba = _nomes(pacote_zip.montar([b, a]))
+    assert "FLAVIA/17-08 pedido sem número/nota-fiscal.pdf" in nomes_ab
+    assert "FLAVIA/17-08 pedido sem número (bbbbbb)/nota-fiscal.pdf" in nomes_ab
+    assert "FLAVIA/17-08 pedido sem número/nota-fiscal.pdf" in nomes_ba
+    assert "FLAVIA/17-08 pedido sem número (aaaaaa)/nota-fiscal.pdf" in nomes_ba
+
+
+def test_queries_do_mes_desempatam_por_id_no_order_by(mocker):
+    # Garante a correção real: sem "id" no fim do ORDER BY, o Postgres não
+    # garante a mesma ordem entre execuções, e o teste acima mostra o efeito
+    # disso — a pasta sem sufixo trocaria de dona a cada download do mesmo mês.
+    query_mock = mocker.patch("routes.pacote.db.query", return_value=[])
+    import routes.pacote as rp
+    rp._compras_do_mes("2026-08-01", "2026-08-31")
+    sql_pedidos = query_mock.call_args_list[0].args[0]
+    sql_contas = query_mock.call_args_list[1].args[0]
+    assert "ORDER BY f.nome, p.data_pedido, p.id" in sql_pedidos
+    assert "ORDER BY c.vencimento, c.id" in sql_contas
+
+
 # --- Falha de rede não derruba o zip (Fix round 1, item 3) -----------------
 
 def test_falha_de_rede_no_download_vira_bilhete_faltou():

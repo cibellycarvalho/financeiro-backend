@@ -38,7 +38,7 @@ def _compras_do_mes(inicio, fim):
            FROM fin_pedidos_fornecedor p
            JOIN fin_fornecedores f ON f.id = p.fornecedor_id
            WHERE p.data_pedido BETWEEN %s AND %s
-           ORDER BY f.nome, p.data_pedido""",
+           ORDER BY f.nome, p.data_pedido, p.id""",
         (inicio, fim),
     )
     contas = db.query(
@@ -54,7 +54,7 @@ def _compras_do_mes(inicio, fim):
                        ELSE '[]' END AS comprovantes
            FROM fin_contas_pagar c
            WHERE c.categoria = 'FORNECEDOR' AND c.vencimento BETWEEN %s AND %s
-           ORDER BY c.vencimento""",
+           ORDER BY c.vencimento, c.id""",
         (inicio, fim),
     )
     return list(pedidos) + list(contas)
