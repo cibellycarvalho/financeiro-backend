@@ -15,6 +15,12 @@ from auth import require_auth, require_admin
 bp = Blueprint("fornecedores", __name__)
 
 
+class _ErroAmarracao(Exception):
+    """Erro de validação de amarração levantado dentro de uma transação, pra
+    forçar o rollback do que já foi gravado antes de responder 400. A
+    mensagem já é a frase pronta pra tela."""
+
+
 def _saldo_aberto_fornecedor(fornecedor_id):
     row = db.query(
         """SELECT
@@ -537,21 +543,31 @@ def marcar_pedido_pago(fornecedor_id, pedido_id):
         if valor > saldo_aberto + 0.005:
             return jsonify({"error": f"Os pagamentos já lançados cobrem esse pedido (em aberto: R$ {saldo_aberto:.2f}). "
                                      "Use \"Pix já lançado\"."}), 400
-        with db.transaction() as cur:
-            cur.execute(
-                """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, pedido_id, criado_por)
-                   VALUES (%s, %s, %s, %s, %s) RETURNING *""",
-                (fornecedor_id, valor, data_pagamento, pedido_id, g.user["user_id"])
-            )
-            pagamento = dict(cur.fetchone())
-            cur.execute(
-                """INSERT INTO fin_pagamento_pedido (pagamento_id, pedido_id, valor)
-                   VALUES (%s, %s, %s)""",
-                (pagamento["id"], pedido_id, valor),
-            )
-            cur.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s RETURNING *",
-                        (data_pagamento, pedido_id))
-            atualizado = dict(cur.fetchone())
+        try:
+            with db.transaction() as cur:
+                cur.execute(
+                    """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, pedido_id, criado_por)
+                       VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+                    (fornecedor_id, valor, data_pagamento, pedido_id, g.user["user_id"])
+                )
+                pagamento = dict(cur.fetchone())
+                # Confere que esse valor cabe na compra — uma compra com
+                # adiantamento já amarrado pode não ter mais espaço pro valor
+                # cheio que esta caixinha está lançando.
+                erro = amarracao.validar(cur, pagamento["id"], fornecedor_id,
+                                          [{"pedido_id": pedido_id, "valor": valor}])
+                if erro:
+                    raise _ErroAmarracao(erro)
+                cur.execute(
+                    """INSERT INTO fin_pagamento_pedido (pagamento_id, pedido_id, valor)
+                       VALUES (%s, %s, %s)""",
+                    (pagamento["id"], pedido_id, valor),
+                )
+                cur.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s RETURNING *",
+                            (data_pagamento, pedido_id))
+                atualizado = dict(cur.fetchone())
+        except _ErroAmarracao as e:
+            return jsonify({"error": str(e)}), 400
         atualizado["pagamento"] = pagamento
         return jsonify(atualizado), 201
 
@@ -579,14 +595,16 @@ def desmarcar_pedido_pago(fornecedor_id, pedido_id):
     if not _pedido_do_fornecedor(fornecedor_id, pedido_id):
         return jsonify({"error": "Pedido não encontrado"}), 404
     with db.transaction() as cur:
+        # Só apaga o pagamento cuja coluna legada pedido_id apontava pra este
+        # pedido (o "lancar" de um pedido só). NÃO apagar direto de
+        # fin_pagamento_pedido por pedido_id: isso levaria junto a amarração
+        # de outros pagamentos que continuam existindo (ex.: um Pix que também
+        # pagou outra compra e não deveria perder essa ligação). A FK já é
+        # ON DELETE CASCADE, então o DELETE abaixo sozinho já limpa a ligação
+        # do pagamento que de fato foi apagado.
         cur.execute("DELETE FROM fin_pagamentos_fornecedor WHERE pedido_id = %s AND fornecedor_id = %s",
                     (pedido_id, fornecedor_id))
         cur.execute("UPDATE fin_pedidos_fornecedor SET pago_em = NULL WHERE id = %s", (pedido_id,))
-        # A FK de fin_pagamento_pedido já é ON DELETE CASCADE (o DELETE acima
-        # cuida da ligação com o pagamento apagado); isto aqui limpa a ligação
-        # de outros pagamentos que continuam existindo mas apontavam pra este
-        # pedido (amarração parcial de mais de um Pix).
-        cur.execute("DELETE FROM fin_pagamento_pedido WHERE pedido_id = %s", (pedido_id,))
     return "", 204
 
 
@@ -630,7 +648,7 @@ def amarrar_pagamento(fornecedor_id, pagamento_id):
         return jsonify({"error": "itens obrigatório (lista)"}), 400
 
     with db.transaction() as cur:
-        erro = amarracao.validar(cur, pagamento_id, itens)
+        erro = amarracao.validar(cur, pagamento_id, fornecedor_id, itens)
         if erro:
             return jsonify({"error": erro}), 400
         cur.execute("DELETE FROM fin_pagamento_pedido WHERE pagamento_id = %s", (pagamento_id,))
@@ -738,8 +756,11 @@ def registrar_pagamento(fornecedor_id):
     id_transacao = (data.get("id_transacao") or "").strip() or None
     arquivo_token = (data.get("arquivo_token") or "").strip() or None
     pedido_id = (data.get("pedido_id") or "").strip() or None
-    if pedido_id and not _pedido_do_fornecedor(fornecedor_id, pedido_id):
-        return jsonify({"error": "Pedido não encontrado"}), 404
+    pedido_amarrado = None
+    if pedido_id:
+        pedido_amarrado = _pedido_do_fornecedor(fornecedor_id, pedido_id)
+        if not pedido_amarrado:
+            return jsonify({"error": "Pedido não encontrado"}), 404
     alias_destinatario = data.get("alias_destinatario")
 
     if arquivo_token and not anexos.arquivo_token_valido(arquivo_token):
@@ -768,10 +789,13 @@ def registrar_pagamento(fornecedor_id):
     if pedido_id:
         db.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s",
                    (data["data_pagamento"], pedido_id))
+        # O link vale no máximo o que cabe na compra: um Pix maior que o
+        # pedido não pode amarrar mais do que o valor_total dele.
+        valor_link = min(valor, float(pedido_amarrado["valor_total"]))
         db.execute(
             """INSERT INTO fin_pagamento_pedido (pagamento_id, pedido_id, valor)
                VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
-            (row["id"], pedido_id, valor),
+            (row["id"], pedido_id, valor_link),
         )
 
     # O pagamento já está gravado: o alias vale mesmo que o anexo falhe abaixo.
@@ -817,6 +841,15 @@ def editar_pagamento(fornecedor_id, pagamento_id):
     if not pagamentos_atuais:
         return jsonify({"error": "Pagamento não encontrado"}), 404
     valor_atual = float(pagamentos_atuais[0]["valor"])
+
+    amarrado = db.query(
+        "SELECT COALESCE(SUM(valor), 0) AS amarrado FROM fin_pagamento_pedido WHERE pagamento_id = %s",
+        (pagamento_id,)
+    )
+    total_amarrado = float(amarrado[0]["amarrado"])
+    if valor < total_amarrado - amarracao.TOLERANCIA:
+        return jsonify({"error": f"Esse pagamento está amarrado a R$ {total_amarrado:.2f} em compras — "
+                                 "desamarre antes de baixar o valor."}), 400
 
     saldo_sem_este = _saldo_aberto_fornecedor(fornecedor_id) + valor_atual
     if valor > saldo_sem_este:
