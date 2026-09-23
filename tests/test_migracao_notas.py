@@ -15,3 +15,9 @@ def test_migracao_leva_as_amarracoes_antigas():
     texto = SQL.read_text()
     assert "INSERT INTO fin_pagamento_pedido" in texto
     assert "WHERE pg.pedido_id IS NOT NULL" in texto
+
+
+def test_migracao_cria_policies_rls():
+    texto = SQL.read_text()
+    assert "CREATE POLICY fin_select ON fin_pagamento_pedido" in texto
+    assert "CREATE POLICY fin_write ON fin_pagamento_pedido" in texto

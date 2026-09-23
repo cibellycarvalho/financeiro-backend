@@ -29,3 +29,9 @@ ON CONFLICT DO NOTHING;
 -- no navegador de quem não recarregou.
 
 ALTER TABLE fin_pagamento_pedido ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY fin_select ON fin_pagamento_pedido FOR SELECT
+  USING (auth.uid() IN (SELECT user_id FROM fin_user_roles));
+
+CREATE POLICY fin_write ON fin_pagamento_pedido FOR ALL
+  USING (auth.uid() IN (SELECT user_id FROM fin_user_roles WHERE role = 'fin_admin'));
