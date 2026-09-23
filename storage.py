@@ -79,12 +79,20 @@ def url_assinada(caminho: str, segundos: int = 3600) -> str:
 
 
 def baixar(caminho: str) -> bytes:
-    """Conteúdo do arquivo. Usado para montar o pacote do mês."""
-    resp = requests.get(
-        f"{_base()}/object/{BUCKET}/{caminho}",
-        headers=_headers(),
-        timeout=60,
-    )
+    """Conteúdo do arquivo. Usado para montar o pacote do mês.
+
+    Timeout, conexão caindo etc. viram StorageErro como qualquer outra falha —
+    quem chama (o zip do mês) não deve explodir por causa de uma rede ruim no
+    meio da lista.
+    """
+    try:
+        resp = requests.get(
+            f"{_base()}/object/{BUCKET}/{caminho}",
+            headers=_headers(),
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        raise StorageErro(f"Storage: falha de rede ao baixar arquivo: {e}")
     _checar(resp, "baixar arquivo")
     return resp.content
 

@@ -13,11 +13,20 @@ bp = Blueprint("pacote", __name__)
 
 
 def _compras_do_mes(inicio, fim):
-    """Compras de fornecedor do mês + as contas a pagar de categoria FORNECEDOR."""
+    """Compras de fornecedor do mês + as contas a pagar de categoria FORNECEDOR.
+
+    Um pedido pode estar marcado como pago (`pago_em`) sem nenhuma linha em
+    fin_pagamento_pedido — a caixinha "pago" consome o valor sem amarrar Pix
+    nenhum. Uma conta a pagar pode estar com status='pago' sem
+    comprovante_path anexado. Os dois casos precisam sair do resumo como
+    pagos mesmo sem arquivo — "paga" é uma pergunta, "tem comprovante" é
+    outra.
+    """
     pedidos = db.query(
-        """SELECT COALESCE(f.apelido, f.nome) AS fornecedor,
+        """SELECT p.id, COALESCE(f.apelido, f.nome) AS fornecedor,
                   p.data_pedido AS data_compra, p.numero_pedido,
                   p.valor_total AS valor, p.nf_path, p.arquivo_path AS pedido_path,
+                  p.pago_em, 'pedido' AS origem,
                   COALESCE((
                     SELECT json_agg(json_build_object(
                              'path', pg.arquivo_path, 'data', pg.data_pagamento, 'valor', lig.valor)
@@ -33,10 +42,11 @@ def _compras_do_mes(inicio, fim):
         (inicio, fim),
     )
     contas = db.query(
-        """SELECT 'CONTAS A PAGAR' AS fornecedor, c.vencimento AS data_compra,
+        """SELECT c.id, 'CONTAS A PAGAR' AS fornecedor, c.vencimento AS data_compra,
                   c.descricao AS numero_pedido, c.valor, c.nf_path,
                   NULL AS pedido_path,
-                  CASE WHEN c.status = 'pago' AND c.comprovante_path IS NOT NULL
+                  (c.status = 'pago') AS pago, 'conta a pagar' AS origem,
+                  CASE WHEN c.comprovante_path IS NOT NULL
                        THEN json_build_array(json_build_object(
                               'path', c.comprovante_path,
                               'data', COALESCE(c.data_pagamento, c.vencimento),
@@ -56,7 +66,7 @@ def baixar_compras(mes):
     if not re.fullmatch(r"\d{4}-\d{2}", mes):
         return jsonify({"error": "mês no formato AAAA-MM"}), 400
     ano, m = int(mes[:4]), int(mes[5:])
-    if not 1 <= m <= 12:
+    if not 1 <= m <= 12 or not 2000 <= ano <= 2100:
         return jsonify({"error": "mês no formato AAAA-MM"}), 400
     inicio = date(ano, m, 1)
     fim = date(ano, m, calendar.monthrange(ano, m)[1])

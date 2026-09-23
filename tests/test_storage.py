@@ -92,3 +92,22 @@ def test_limpar_pendentes_sem_velhos_nao_chama_delete(mocker):
     delete = mocker.patch("storage.requests.delete")
     assert storage.limpar_pendentes(agora=agora) == 0
     delete.assert_not_called()
+
+
+def test_baixar_devolve_conteudo(mocker):
+    get = mocker.patch("storage.requests.get", return_value=_resp(200))
+    get.return_value.content = b"%PDF-1.4"
+    assert storage.baixar("forn/notas/x.pdf") == b"%PDF-1.4"
+
+
+def test_baixar_erro_http_vira_storage_erro(mocker):
+    mocker.patch("storage.requests.get", return_value=_resp(404))
+    with pytest.raises(storage.StorageErro):
+        storage.baixar("forn/notas/sumiu.pdf")
+
+
+def test_baixar_erro_de_rede_vira_storage_erro(mocker):
+    import requests
+    mocker.patch("storage.requests.get", side_effect=requests.exceptions.ReadTimeout("timeout"))
+    with pytest.raises(storage.StorageErro):
+        storage.baixar("forn/notas/x.pdf")
