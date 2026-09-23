@@ -787,6 +787,45 @@ def anexo_pedido(fornecedor_id, pedido_id):
     return anexos.url_anexo("fin_pedidos_fornecedor", "fornecedor_id", fornecedor_id, pedido_id)
 
 
+@bp.post("/<fornecedor_id>/pedidos/<pedido_id>/nf")
+@require_auth
+@require_admin
+def subir_nf_pedido(fornecedor_id, pedido_id):
+    """Nota fiscal da compra. Sem leitura por IA: é arquivo para a contabilidade,
+    não dado que a tela precise entender."""
+    rows = db.query(
+        "SELECT id FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pedido_id, fornecedor_id),
+    )
+    if not rows:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+
+    dados, mime, erro = anexos.ler_arquivo_enviado()
+    if erro:
+        return erro
+
+    try:
+        token = anexos.subir_pendente(dados, mime)
+        destino = anexos.destino_anexo(fornecedor_id, "notas", pedido_id, token)
+        storage.mover(token, destino)
+    except storage.StorageErro as e:
+        print(f"[storage] falhou ao guardar a nota do pedido: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return jsonify({"error": "Não consegui guardar a nota. Tente de novo."}), 500
+
+    row = db.execute(
+        "UPDATE fin_pedidos_fornecedor SET nf_path = %s WHERE id = %s RETURNING nf_path",
+        (destino, pedido_id),
+    )
+    return jsonify({"nf_path": row["nf_path"]})
+
+
+@bp.get("/<fornecedor_id>/pedidos/<pedido_id>/nf")
+@require_auth
+def anexo_nf_pedido(fornecedor_id, pedido_id):
+    return anexos.url_anexo("fin_pedidos_fornecedor", "fornecedor_id", fornecedor_id,
+                            pedido_id, coluna_arquivo="nf_path")
+
+
 @bp.get("/<fornecedor_id>/pagamentos/<pagamento_id>/anexo")
 @require_auth
 def anexo_pagamento(fornecedor_id, pagamento_id):
