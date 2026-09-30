@@ -54,6 +54,43 @@ def test_list_pedidos_com_itens(client, admin_headers):
     assert body["itens"][0]["produto"] == "Cabo HDMI 8K 2M"
 
 
+def test_list_pedidos_traz_valor_amarrado(client, admin_headers):
+    """Fix round 1 (item 8): a tela de 'Pix sem compra' propõe amarrar o
+    valor_total inteiro de novo mesmo quando parte do pedido já está amarrada
+    a outro Pix. Precisa do saldo já amarrado para propor só o que falta."""
+    pedido_com_amarracao = {**PEDIDO_FIXTURE, "amarrado": 2000.00}
+    with patch("routes.fornecedores.db.query", return_value=[pedido_com_amarracao]):
+        resp = client.get(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pedidos",
+            headers=admin_headers
+        )
+    assert resp.status_code == 200
+    assert resp.get_json()[0]["amarrado"] == 2000.00
+
+
+def test_list_pagamentos_traz_amarracoes(client, admin_headers):
+    """Fix round 1 (item 2, CRITICAL): depois de amarrar, o Pix precisa
+    continuar mostrando a que compras ficou amarrado — sem isso a única saída
+    pra corrigir um erro era apagar o pagamento inteiro e relançar."""
+    pagamento_amarrado = {
+        "id": "pg-1", "fornecedor_id": FORNECEDOR_FIXTURE["id"], "valor": 49310.00,
+        "data_pagamento": "2026-09-14", "arquivo_path": None,
+        "amarracoes": [
+            {"pedido_id": PEDIDO_FIXTURE["id"], "numero_pedido": "10",
+             "data_pedido": "2026-08-10", "valor": 30000.00},
+        ],
+    }
+    with patch("routes.fornecedores.db.query", return_value=[pagamento_amarrado]):
+        resp = client.get(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos",
+            headers=admin_headers
+        )
+    assert resp.status_code == 200
+    body = resp.get_json()[0]
+    assert body["amarracoes"][0]["numero_pedido"] == "10"
+    assert body["amarracoes"][0]["valor"] == 30000.00
+
+
 def test_create_pedido_com_itens(client, admin_headers):
     payload = {
         "data_pedido": "2026-08-01",
@@ -420,6 +457,28 @@ def test_registrar_pagamento_fornecedor(client, admin_headers):
     assert "INSERT INTO fin_pagamentos_fornecedor" in insert_sql
 
 
+def test_registrar_pagamento_liga_no_maximo_o_valor_da_compra(client, admin_headers):
+    """Ruling do fix round 1: o link em fin_pagamento_pedido vale no máximo o
+    que cabe na compra, não o valor cheio do Pix quando o Pix é maior."""
+    fornecedor_ativo = [{"id": FORNECEDOR_FIXTURE["id"]}]
+    saldo_row = [{"saldo_aberto": 5600.00}]
+    pedido_amarrado = [{"id": PEDIDO_FIXTURE["id"], "valor_total": 500.00, "pago_em": None}]
+    pagamento_criado = {"id": "pg1", "fornecedor_id": FORNECEDOR_FIXTURE["id"],
+                         "valor": 800.00, "data_pagamento": "2026-08-05"}
+    with patch("routes.fornecedores.db.query", side_effect=[fornecedor_ativo, saldo_row, pedido_amarrado]), \
+         patch("routes.fornecedores.db.execute", return_value=pagamento_criado) as mock_execute:
+        resp = client.post(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos",
+            json={"valor": 800.00, "data_pagamento": "2026-08-05", "pedido_id": PEDIDO_FIXTURE["id"]},
+            headers=admin_headers
+        )
+    assert resp.status_code == 201
+    insert_calls = [c for c in mock_execute.call_args_list if "INSERT INTO fin_pagamento_pedido" in c[0][0]]
+    assert len(insert_calls) == 1
+    params = insert_calls[0][0][1]
+    assert params[2] == 500.00
+
+
 def test_registrar_pagamento_fornecedor_maior_que_saldo_retorna_erro(client, admin_headers):
     fornecedor_ativo = [{"id": FORNECEDOR_FIXTURE["id"]}]
     saldo_row = [{"saldo_aberto": 100.00}]
@@ -444,10 +503,11 @@ def test_registrar_pagamento_fornecedor_inexistente_retorna_404(client, admin_he
 
 def test_editar_pagamento_fornecedor(client, admin_headers):
     pagamento_atual = [{"valor": 2000.00}]
+    amarrado_row = [{"amarrado": 0.0}]
     saldo_row = [{"saldo_aberto": 3600.00}]
     pagamento_editado = {"id": "pg1", "fornecedor_id": FORNECEDOR_FIXTURE["id"],
                           "valor": 2500.00, "data_pagamento": "2026-08-06"}
-    with patch("routes.fornecedores.db.query", side_effect=[pagamento_atual, saldo_row]), \
+    with patch("routes.fornecedores.db.query", side_effect=[pagamento_atual, amarrado_row, saldo_row]), \
          patch("routes.fornecedores.db.execute", return_value=pagamento_editado):
         resp = client.put(
             f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos/pg1",
@@ -456,6 +516,23 @@ def test_editar_pagamento_fornecedor(client, admin_headers):
         )
     assert resp.status_code == 200
     assert resp.get_json()["valor"] == 2500.00
+
+
+def test_editar_pagamento_baixando_abaixo_do_amarrado_e_recusado(client, admin_headers):
+    """Ruling do fix round 1: baixar o valor de um pagamento já amarrado a
+    compras não pode deixar a soma amarrada maior que o próprio pagamento."""
+    pagamento_atual = [{"valor": 2000.00}]
+    amarrado_row = [{"amarrado": 1500.00}]
+    with patch("routes.fornecedores.db.query", side_effect=[pagamento_atual, amarrado_row]), \
+         patch("routes.fornecedores.db.execute") as mock_execute:
+        resp = client.put(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos/pg1",
+            json={"valor": 1000.00, "data_pagamento": "2026-08-06"},
+            headers=admin_headers
+        )
+    assert resp.status_code == 400
+    assert "amarrado" in resp.get_json()["error"]
+    mock_execute.assert_not_called()
 
 
 def test_editar_pagamento_fornecedor_inexistente_retorna_404(client, admin_headers):
@@ -469,15 +546,17 @@ def test_editar_pagamento_fornecedor_inexistente_retorna_404(client, admin_heade
 
 
 def test_excluir_pagamento_fornecedor(client, admin_headers):
-    with patch("routes.fornecedores.db.query", return_value=[{"id": "pg1"}]), \
-         patch("routes.fornecedores.db.execute") as mock_execute:
+    mock_transaction, mock_cur = _mock_transaction_cursor([])
+    mock_cur.fetchall.return_value = []
+    with patch("routes.fornecedores.db.query", return_value=[{"id": "pg1", "pedido_id": None}]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
         resp = client.delete(
             f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos/pg1",
             headers=admin_headers
         )
     assert resp.status_code == 204
-    delete_sql = mock_execute.call_args[0][0]
-    assert "DELETE FROM fin_pagamentos_fornecedor" in delete_sql
+    sqls = [c[0][0] for c in mock_cur.execute.call_args_list]
+    assert any("DELETE FROM fin_pagamentos_fornecedor" in s for s in sqls)
 
 
 def test_excluir_pagamento_fornecedor_inexistente_retorna_404(client, admin_headers):
@@ -515,8 +594,10 @@ def test_caixinha_lancar_cria_pagamento_amarrado_e_marca_pedido(client, admin_he
     pedido = [{"id": P_ID, "valor_total": 35310.00, "pago_em": None}]
     saldo = [{"saldo_aberto": 273320.00}]
     mock_transaction, mock_cur = _mock_transaction_cursor([
-        {"id": "pg1", "valor": 35310.00, "pedido_id": P_ID},
-        {"id": P_ID, "pago_em": "2026-09-17"},
+        {"id": "pg1", "valor": 35310.00, "pedido_id": P_ID},   # INSERT do pagamento
+        {"valor": 35310.00},                                   # amarracao.validar: valor do pagamento
+        {"valor_total": 35310.00, "amarrado": 0.0},            # amarracao.validar: pedido sem amarração prévia
+        {"id": P_ID, "pago_em": "2026-09-17"},                 # UPDATE pago_em
     ])
     with patch("routes.fornecedores.db.query", side_effect=[pedido, saldo]), \
          patch("routes.fornecedores.db.transaction", mock_transaction):
@@ -526,6 +607,27 @@ def test_caixinha_lancar_cria_pagamento_amarrado_e_marca_pedido(client, admin_he
     insert_sql, params = mock_cur.execute.call_args_list[0][0]
     assert "INSERT INTO fin_pagamentos_fornecedor" in insert_sql
     assert params[1] == 35310.00 and params[3] == P_ID
+
+
+def test_caixinha_lancar_recusa_quando_adiantamento_ja_ocupou_a_compra(client, admin_headers):
+    """Ruling do fix round 1: clicar 'Pago' (modo lancar) não pode gravar o
+    link se a compra já tem amarração de um adiantamento e não sobra espaço
+    pro valor cheio do novo pagamento — antes isso estourava a soma amarrada."""
+    pedido = [{"id": P_ID, "valor_total": 30000.00, "pago_em": None}]
+    saldo = [{"saldo_aberto": 273320.00}]
+    mock_transaction, mock_cur = _mock_transaction_cursor([
+        {"id": "pg-novo", "valor": 30000.00, "pedido_id": P_ID},   # INSERT do pagamento novo
+        {"valor": 30000.00},                                        # amarracao.validar: valor do pagamento novo
+        {"valor_total": 30000.00, "amarrado": 10000.00},            # já tem 10.000 de adiantamento amarrado
+    ])
+    with patch("routes.fornecedores.db.query", side_effect=[pedido, saldo]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
+        resp = client.post(URL_PAGO, json={"modo": "lancar", "data_pagamento": "2026-09-17"}, headers=admin_headers)
+    assert resp.status_code == 400
+    assert "compra" in resp.get_json()["error"]
+    sqls = [c[0][0] for c in mock_cur.execute.call_args_list]
+    assert not any("INSERT INTO fin_pagamento_pedido" in s for s in sqls)
+    assert not any("pago_em" in s for s in sqls)
 
 
 def test_caixinha_ja_lancado_recusa_quando_pix_nao_cobre(client, admin_headers):
@@ -564,6 +666,27 @@ def test_desmarcar_caixinha_apaga_pagamento_amarrado(client, admin_headers):
     sqls = [c[0][0] for c in mock_cur.execute.call_args_list]
     assert "DELETE FROM fin_pagamentos_fornecedor WHERE pedido_id" in sqls[0]
     assert "pago_em = NULL" in sqls[1]
+
+
+def test_desmarcar_ja_lancado_nao_apaga_amarracao_de_pagamento_que_continua(client, admin_headers):
+    """RULING (fix round 1, CRITICAL): Pix de 49.310 amarrado às compras de
+    10/08 e 11/08 via fin_pagamento_pedido. A de 10/08 foi marcada no modo
+    'ja_lancado' (não criou pagamento novo — só marcou pago_em). Desmarcar a
+    caixinha da 10/08 não pode apagar a ligação Pix->10/08: esse Pix continua
+    existindo e ainda tem a alocação de 30.000 pra ele. O DELETE FROM
+    fin_pagamentos_fornecedor (coluna legada pedido_id) não acha nada pra
+    apagar aqui, e não deve haver nenhum DELETE direto em
+    fin_pagamento_pedido — o ON DELETE CASCADE só entra em ação quando o
+    pagamento em si é apagado."""
+    mock_transaction, mock_cur = _mock_transaction_cursor([])
+    with patch("routes.fornecedores.db.query",
+               return_value=[{"id": P_ID, "valor_total": 30000.00, "pago_em": "2026-08-10"}]), \
+         patch("routes.fornecedores.db.transaction", mock_transaction):
+        resp = client.delete(URL_PAGO, headers=admin_headers)
+    assert resp.status_code == 204
+    sqls = [c[0][0] for c in mock_cur.execute.call_args_list]
+    assert len(sqls) == 2
+    assert not any("fin_pagamento_pedido" in s for s in sqls)
 
 
 def test_caixinha_viewer_nao_pode_marcar_viewer(client, viewer_headers):

@@ -3,6 +3,7 @@ import sys
 from datetime import date
 
 from flask import Blueprint, request, jsonify, g
+import amarracao
 import anexos
 from anexos import MSG_LEITURA_INDISPONIVEL, MSG_ANEXO_NAO_GUARDADO
 import db
@@ -12,6 +13,12 @@ import storage
 from auth import require_auth, require_admin
 
 bp = Blueprint("fornecedores", __name__)
+
+
+class _ErroAmarracao(Exception):
+    """Erro de validação de amarração levantado dentro de uma transação, pra
+    forçar o rollback do que já foi gravado antes de responder 400. A
+    mensagem já é a frase pronta pra tela."""
 
 
 def _saldo_aberto_fornecedor(fornecedor_id):
@@ -147,7 +154,13 @@ def listar_pedidos(fornecedor_id):
                           'valor_unitario', i.valor_unitario, 'valor_total', i.valor_total
                         ) ORDER BY i.created_at
                       ) FROM fin_pedido_itens i WHERE i.pedido_id = p.id), '[]'
-                   ) AS itens
+                   ) AS itens,
+                   -- Fix round 1 (item 8 da revisão): a tela de "Pix sem compra"
+                   -- precisa saber quanto já está amarrado a cada pedido, para
+                   -- não propor amarrar de novo o que outro Pix já cobriu.
+                   COALESCE(
+                     (SELECT SUM(lig.valor) FROM fin_pagamento_pedido lig WHERE lig.pedido_id = p.id), 0
+                   ) AS amarrado
             FROM fin_pedidos_fornecedor p
             WHERE p.fornecedor_id = %s
             ORDER BY p.data_pedido DESC""",
@@ -536,16 +549,31 @@ def marcar_pedido_pago(fornecedor_id, pedido_id):
         if valor > saldo_aberto + 0.005:
             return jsonify({"error": f"Os pagamentos já lançados cobrem esse pedido (em aberto: R$ {saldo_aberto:.2f}). "
                                      "Use \"Pix já lançado\"."}), 400
-        with db.transaction() as cur:
-            cur.execute(
-                """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, pedido_id, criado_por)
-                   VALUES (%s, %s, %s, %s, %s) RETURNING *""",
-                (fornecedor_id, valor, data_pagamento, pedido_id, g.user["user_id"])
-            )
-            pagamento = dict(cur.fetchone())
-            cur.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s RETURNING *",
-                        (data_pagamento, pedido_id))
-            atualizado = dict(cur.fetchone())
+        try:
+            with db.transaction() as cur:
+                cur.execute(
+                    """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, pedido_id, criado_por)
+                       VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+                    (fornecedor_id, valor, data_pagamento, pedido_id, g.user["user_id"])
+                )
+                pagamento = dict(cur.fetchone())
+                # Confere que esse valor cabe na compra — uma compra com
+                # adiantamento já amarrado pode não ter mais espaço pro valor
+                # cheio que esta caixinha está lançando.
+                erro = amarracao.validar(cur, pagamento["id"], fornecedor_id,
+                                          [{"pedido_id": pedido_id, "valor": valor}])
+                if erro:
+                    raise _ErroAmarracao(erro)
+                cur.execute(
+                    """INSERT INTO fin_pagamento_pedido (pagamento_id, pedido_id, valor)
+                       VALUES (%s, %s, %s)""",
+                    (pagamento["id"], pedido_id, valor),
+                )
+                cur.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s RETURNING *",
+                            (data_pagamento, pedido_id))
+                atualizado = dict(cur.fetchone())
+        except _ErroAmarracao as e:
+            return jsonify({"error": str(e)}), 400
         atualizado["pagamento"] = pagamento
         return jsonify(atualizado), 201
 
@@ -573,6 +601,13 @@ def desmarcar_pedido_pago(fornecedor_id, pedido_id):
     if not _pedido_do_fornecedor(fornecedor_id, pedido_id):
         return jsonify({"error": "Pedido não encontrado"}), 404
     with db.transaction() as cur:
+        # Só apaga o pagamento cuja coluna legada pedido_id apontava pra este
+        # pedido (o "lancar" de um pedido só). NÃO apagar direto de
+        # fin_pagamento_pedido por pedido_id: isso levaria junto a amarração
+        # de outros pagamentos que continuam existindo (ex.: um Pix que também
+        # pagou outra compra e não deveria perder essa ligação). A FK já é
+        # ON DELETE CASCADE, então o DELETE abaixo sozinho já limpa a ligação
+        # do pagamento que de fato foi apagado.
         cur.execute("DELETE FROM fin_pagamentos_fornecedor WHERE pedido_id = %s AND fornecedor_id = %s",
                     (pedido_id, fornecedor_id))
         cur.execute("UPDATE fin_pedidos_fornecedor SET pago_em = NULL WHERE id = %s", (pedido_id,))
@@ -583,10 +618,126 @@ def desmarcar_pedido_pago(fornecedor_id, pedido_id):
 @require_auth
 def listar_pagamentos(fornecedor_id):
     rows = db.query(
-        "SELECT * FROM fin_pagamentos_fornecedor WHERE fornecedor_id = %s ORDER BY data_pagamento, created_at",
+        """SELECT pg.*,
+                   -- Fix round 1 (item 2 da revisão, CRITICAL): sem isto, depois de
+                   -- amarrar o Pix desaparece de "Pix sem compra" e nenhum lugar da
+                   -- tela mostra a que compra ele ficou amarrado — a única saída
+                   -- virava apagar o pagamento inteiro e relançar.
+                   COALESCE(
+                     (SELECT json_agg(
+                        json_build_object(
+                          'pedido_id', lig.pedido_id, 'numero_pedido', ped.numero_pedido,
+                          'data_pedido', ped.data_pedido, 'valor', lig.valor
+                        ) ORDER BY ped.data_pedido
+                      ) FROM fin_pagamento_pedido lig
+                        JOIN fin_pedidos_fornecedor ped ON ped.id = lig.pedido_id
+                        WHERE lig.pagamento_id = pg.id), '[]'
+                   ) AS amarracoes
+            FROM fin_pagamentos_fornecedor pg
+            WHERE pg.fornecedor_id = %s
+            ORDER BY pg.data_pagamento, pg.created_at""",
         (fornecedor_id,)
     )
     return jsonify(rows)
+
+
+@bp.get("/<fornecedor_id>/pagamentos/soltos")
+@require_auth
+def pagamentos_soltos(fornecedor_id):
+    """Pix daquele fornecedor que ainda não dizem qual compra pagaram."""
+    rows = db.query(
+        """SELECT pg.id, pg.valor, pg.data_pagamento, pg.arquivo_path
+           FROM fin_pagamentos_fornecedor pg
+           WHERE pg.fornecedor_id = %s
+             AND NOT EXISTS (SELECT 1 FROM fin_pagamento_pedido lig WHERE lig.pagamento_id = pg.id)
+           ORDER BY pg.data_pagamento DESC""",
+        (fornecedor_id,),
+    )
+    return jsonify(rows)
+
+
+@bp.post("/<fornecedor_id>/pagamentos/<pagamento_id>/pedidos")
+@require_auth
+@require_admin
+def amarrar_pagamento(fornecedor_id, pagamento_id):
+    if not db.query(
+        "SELECT id FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pagamento_id, fornecedor_id),
+    ):
+        return jsonify({"error": "Pagamento não encontrado"}), 404
+
+    itens = (request.get_json() or {}).get("itens")
+    if not isinstance(itens, list):
+        return jsonify({"error": "itens obrigatório (lista)"}), 400
+
+    with db.transaction() as cur:
+        erro = amarracao.validar(cur, pagamento_id, fornecedor_id, itens)
+        if erro:
+            return jsonify({"error": erro}), 400
+        cur.execute("DELETE FROM fin_pagamento_pedido WHERE pagamento_id = %s", (pagamento_id,))
+        for item in itens:
+            cur.execute(
+                """INSERT INTO fin_pagamento_pedido (pagamento_id, pedido_id, valor)
+                   VALUES (%s, %s, %s)""",
+                (pagamento_id, item["pedido_id"], float(item["valor"])),
+            )
+    return jsonify({"itens": itens})
+
+
+def _limpar_pago_em_orfao(cur, pedido_ids, ignorar_pagamento=None):
+    """Tira o `pago_em` das compras que ficaram sem nenhuma baixa.
+
+    "Sem baixa" é: nenhuma linha em fin_pagamento_pedido E nenhum pagamento
+    legado apontando pela coluna `pedido_id`. Uma compra quitada por outro
+    Pix continua paga — era o bug do IMPORTANT 4.
+    """
+    for pedido_id in dict.fromkeys(p for p in pedido_ids if p):
+        cur.execute(
+            """UPDATE fin_pedidos_fornecedor SET pago_em = NULL
+               WHERE id = %s
+                 AND NOT EXISTS (SELECT 1 FROM fin_pagamento_pedido lig
+                                 WHERE lig.pedido_id = %s)
+                 AND NOT EXISTS (SELECT 1 FROM fin_pagamentos_fornecedor pg
+                                 WHERE pg.pedido_id = %s AND (%s IS NULL OR pg.id <> %s))""",
+            (pedido_id, pedido_id, pedido_id, ignorar_pagamento, ignorar_pagamento),
+        )
+
+
+@bp.delete("/<fornecedor_id>/pagamentos/<pagamento_id>/pedidos")
+@require_auth
+@require_admin
+def desamarrar_pagamento(fornecedor_id, pagamento_id):
+    """Desfaz as amarrações do Pix — e apaga o rastro que a coluna legada deixa.
+
+    Fix round 3 (CRITICAL 1): apagar só as linhas de fin_pagamento_pedido
+    deixava `fin_pagamentos_fornecedor.pedido_id` apontando para a compra e o
+    `pago_em` dela preenchido. Depois disso, desmarcar a caixinha "Pago"
+    daquela compra roda DELETE ... WHERE pedido_id = ... e apaga o Pix
+    INTEIRO — levando por CASCADE as amarrações de outras compras e deixando
+    o comprovante órfão; a Caixa da Semana mostra a dívida de volta.
+
+    Por isso, além de apagar os links: limpa a coluna legada do pagamento e
+    tira o `pago_em` das compras que ficaram sem nenhuma amarração (e sem
+    outro pagamento legado apontando para elas).
+    """
+    linhas = db.query(
+        "SELECT id, pedido_id FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pagamento_id, fornecedor_id),
+    )
+    if not linhas:
+        return jsonify({"error": "Pagamento não encontrado"}), 404
+
+    with db.transaction() as cur:
+        cur.execute("SELECT pedido_id FROM fin_pagamento_pedido WHERE pagamento_id = %s",
+                    (pagamento_id,))
+        afetados = [r["pedido_id"] for r in (cur.fetchall() or [])]
+        if linhas[0].get("pedido_id"):
+            afetados.append(linhas[0]["pedido_id"])
+        cur.execute("DELETE FROM fin_pagamento_pedido WHERE pagamento_id = %s", (pagamento_id,))
+        cur.execute("UPDATE fin_pagamentos_fornecedor SET pedido_id = NULL WHERE id = %s",
+                    (pagamento_id,))
+        _limpar_pago_em_orfao(cur, afetados)
+    return "", 204
 
 
 @bp.post("/<fornecedor_id>/pagamentos/ler")
@@ -671,8 +822,11 @@ def registrar_pagamento(fornecedor_id):
     id_transacao = (data.get("id_transacao") or "").strip() or None
     arquivo_token = (data.get("arquivo_token") or "").strip() or None
     pedido_id = (data.get("pedido_id") or "").strip() or None
-    if pedido_id and not _pedido_do_fornecedor(fornecedor_id, pedido_id):
-        return jsonify({"error": "Pedido não encontrado"}), 404
+    pedido_amarrado = None
+    if pedido_id:
+        pedido_amarrado = _pedido_do_fornecedor(fornecedor_id, pedido_id)
+        if not pedido_amarrado:
+            return jsonify({"error": "Pedido não encontrado"}), 404
     alias_destinatario = data.get("alias_destinatario")
 
     if arquivo_token and not anexos.arquivo_token_valido(arquivo_token):
@@ -701,6 +855,14 @@ def registrar_pagamento(fornecedor_id):
     if pedido_id:
         db.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s",
                    (data["data_pagamento"], pedido_id))
+        # O link vale no máximo o que cabe na compra: um Pix maior que o
+        # pedido não pode amarrar mais do que o valor_total dele.
+        valor_link = min(valor, float(pedido_amarrado["valor_total"]))
+        db.execute(
+            """INSERT INTO fin_pagamento_pedido (pagamento_id, pedido_id, valor)
+               VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
+            (row["id"], pedido_id, valor_link),
+        )
 
     # O pagamento já está gravado: o alias vale mesmo que o anexo falhe abaixo.
     _aprender_alias_silencioso(fornecedor_id, alias_destinatario, "destinatario")
@@ -746,6 +908,15 @@ def editar_pagamento(fornecedor_id, pagamento_id):
         return jsonify({"error": "Pagamento não encontrado"}), 404
     valor_atual = float(pagamentos_atuais[0]["valor"])
 
+    amarrado = db.query(
+        "SELECT COALESCE(SUM(valor), 0) AS amarrado FROM fin_pagamento_pedido WHERE pagamento_id = %s",
+        (pagamento_id,)
+    )
+    total_amarrado = float(amarrado[0]["amarrado"])
+    if valor < total_amarrado - amarracao.TOLERANCIA:
+        return jsonify({"error": f"Esse pagamento está amarrado a R$ {total_amarrado:.2f} em compras — "
+                                 "desamarre antes de baixar o valor."}), 400
+
     saldo_sem_este = _saldo_aberto_fornecedor(fornecedor_id) + valor_atual
     if valor > saldo_sem_este:
         return jsonify({"error": f"Valor maior que o saldo disponível (R$ {saldo_sem_este:.2f})"}), 400
@@ -763,6 +934,16 @@ def editar_pagamento(fornecedor_id, pagamento_id):
 @require_auth
 @require_admin
 def excluir_pagamento(fornecedor_id, pagamento_id):
+    """Apaga o Pix e devolve à dívida só as compras que ficaram sem baixa.
+
+    Fix round 3 (IMPORTANT 4): a limpeza olhava só a coluna legada
+    `pedido_id`. Um Pix amarrado a duas compras deixava as duas marcadas
+    como pagas sem pagamento nenhum, e um Pix legado podia limpar o
+    `pago_em` de uma compra que outro Pix já tinha quitado. A limpeza agora
+    sai dos links (mais a coluna legada, que ainda existe) e só zera
+    `pago_em` de compra que ficou sem nenhuma amarração e sem outro
+    pagamento legado apontando para ela.
+    """
     pagamentos = db.query(
         "SELECT id, pedido_id FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
         (pagamento_id, fornecedor_id)
@@ -770,14 +951,16 @@ def excluir_pagamento(fornecedor_id, pagamento_id):
     if not pagamentos:
         return jsonify({"error": "Pagamento não encontrado"}), 404
 
-    db.execute(
-        "DELETE FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
-        (pagamento_id, fornecedor_id)
-    )
-    # Apagou o pagamento que a caixinha lançou: o pedido volta a estar em aberto.
-    if pagamentos[0].get("pedido_id"):
-        db.execute("UPDATE fin_pedidos_fornecedor SET pago_em = NULL WHERE id = %s",
-                   (pagamentos[0]["pedido_id"],))
+    with db.transaction() as cur:
+        cur.execute("SELECT pedido_id FROM fin_pagamento_pedido WHERE pagamento_id = %s",
+                    (pagamento_id,))
+        afetados = [r["pedido_id"] for r in (cur.fetchall() or [])]
+        if pagamentos[0].get("pedido_id"):
+            afetados.append(pagamentos[0]["pedido_id"])
+        # O CASCADE da FK já leva as linhas de fin_pagamento_pedido junto.
+        cur.execute("DELETE FROM fin_pagamentos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+                    (pagamento_id, fornecedor_id))
+        _limpar_pago_em_orfao(cur, afetados, ignorar_pagamento=pagamento_id)
     return "", 204
 
 
@@ -785,6 +968,45 @@ def excluir_pagamento(fornecedor_id, pagamento_id):
 @require_auth
 def anexo_pedido(fornecedor_id, pedido_id):
     return anexos.url_anexo("fin_pedidos_fornecedor", "fornecedor_id", fornecedor_id, pedido_id)
+
+
+@bp.post("/<fornecedor_id>/pedidos/<pedido_id>/nf")
+@require_auth
+@require_admin
+def subir_nf_pedido(fornecedor_id, pedido_id):
+    """Nota fiscal da compra. Sem leitura por IA: é arquivo para a contabilidade,
+    não dado que a tela precise entender."""
+    rows = db.query(
+        "SELECT id FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (pedido_id, fornecedor_id),
+    )
+    if not rows:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+
+    dados, mime, erro = anexos.ler_arquivo_enviado()
+    if erro:
+        return erro
+
+    try:
+        token = anexos.subir_pendente(dados, mime)
+        destino = anexos.destino_anexo(fornecedor_id, "notas", pedido_id, token)
+        storage.mover(token, destino)
+    except storage.StorageErro as e:
+        print(f"[storage] falhou ao guardar a nota do pedido: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return jsonify({"error": "Não consegui guardar a nota. Tente de novo."}), 500
+
+    row = db.execute(
+        "UPDATE fin_pedidos_fornecedor SET nf_path = %s WHERE id = %s RETURNING nf_path",
+        (destino, pedido_id),
+    )
+    return jsonify({"nf_path": row["nf_path"]})
+
+
+@bp.get("/<fornecedor_id>/pedidos/<pedido_id>/nf")
+@require_auth
+def anexo_nf_pedido(fornecedor_id, pedido_id):
+    return anexos.url_anexo("fin_pedidos_fornecedor", "fornecedor_id", fornecedor_id,
+                            pedido_id, coluna_arquivo="nf_path")
 
 
 @bp.get("/<fornecedor_id>/pagamentos/<pagamento_id>/anexo")

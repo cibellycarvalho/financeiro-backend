@@ -93,3 +93,47 @@ def test_marcar_como_pago(client, admin_headers):
 def test_delete_conta_viewer_negado(client, viewer_headers):
     resp = client.delete("/api/contas/qualquer-id", headers=viewer_headers)
     assert resp.status_code == 403
+
+
+import io
+from unittest.mock import patch
+
+TOKEN = "pendentes/" + "b" * 32 + ".pdf"
+
+
+def _pdf():
+    return {"arquivo": (io.BytesIO(b"%PDF-1.4 x"), "doc.pdf", "application/pdf")}
+
+
+def test_sobe_nota_da_conta(client, admin_headers):
+    with patch("db.query", return_value=[{"id": "c1"}]), \
+         patch("anexos.subir_pendente", return_value=TOKEN), \
+         patch("storage.mover"), \
+         patch("db.execute", return_value={"nf_path": "contas/c1-nf.pdf"}):
+        resp = client.post("/api/contas/c1/anexo/nf", data=_pdf(),
+                           content_type="multipart/form-data", headers=admin_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()["nf_path"] == "contas/c1-nf.pdf"
+
+
+def test_sobe_comprovante_da_conta(client, admin_headers):
+    with patch("db.query", return_value=[{"id": "c1"}]), \
+         patch("anexos.subir_pendente", return_value=TOKEN), \
+         patch("storage.mover"), \
+         patch("db.execute", return_value={"comprovante_path": "contas/c1-comprovante.pdf"}):
+        resp = client.post("/api/contas/c1/anexo/comprovante", data=_pdf(),
+                           content_type="multipart/form-data", headers=admin_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()["comprovante_path"] == "contas/c1-comprovante.pdf"
+
+
+def test_tipo_de_anexo_invalido_da_400(client, admin_headers):
+    resp = client.post("/api/contas/c1/anexo/foto", data=_pdf(),
+                       content_type="multipart/form-data", headers=admin_headers)
+    assert resp.status_code == 400
+
+
+def test_url_do_anexo_da_conta_sem_arquivo_da_404(client, admin_headers):
+    with patch("db.query", return_value=[{"nf_path": None}]):
+        resp = client.get("/api/contas/c1/anexo/nf", headers=admin_headers)
+    assert resp.status_code == 404

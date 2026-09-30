@@ -428,3 +428,44 @@ def test_anexo_viewer_pode_ver(client, viewer_headers, mocker):
     mocker.patch("routes.fornecedores.storage.url_assinada", return_value="https://x/assinada")
     r = client.get(f"/api/fornecedores/{FORN}/pedidos/p-1/anexo", headers=viewer_headers)
     assert r.status_code == 200
+
+
+import io
+from unittest.mock import patch
+
+
+def _arquivo_nf(nome="nota.pdf", mime="application/pdf"):
+    return {"arquivo": (io.BytesIO(b"%PDF-1.4 conteudo"), nome, mime)}
+
+
+def test_sobe_nota_fiscal_do_pedido(client, admin_headers):
+    with patch("db.query", return_value=[{"id": "ped-1"}]), \
+         patch("anexos.subir_pendente", return_value="pendentes/" + "a" * 32 + ".pdf"), \
+         patch("storage.mover") as mover, \
+         patch("db.execute", return_value={"id": "ped-1", "nf_path": "forn-1/notas/ped-1.pdf"}):
+        resp = client.post(
+            "/api/fornecedores/forn-1/pedidos/ped-1/nf",
+            data=_arquivo_nf(), content_type="multipart/form-data", headers=admin_headers,
+        )
+    assert resp.status_code == 200
+    assert resp.get_json()["nf_path"] == "forn-1/notas/ped-1.pdf"
+    mover.assert_called_once()
+
+
+def test_nota_de_pedido_de_outro_fornecedor_da_404(client, admin_headers):
+    with patch("db.query", return_value=[]):
+        resp = client.post(
+            "/api/fornecedores/forn-1/pedidos/ped-9/nf",
+            data=_arquivo_nf(), content_type="multipart/form-data", headers=admin_headers,
+        )
+    assert resp.status_code == 404
+
+
+def test_nota_recusa_tipo_de_arquivo_errado(client, admin_headers):
+    with patch("db.query", return_value=[{"id": "ped-1"}]):
+        resp = client.post(
+            "/api/fornecedores/forn-1/pedidos/ped-1/nf",
+            data=_arquivo_nf("nota.docx", "application/msword"),
+            content_type="multipart/form-data", headers=admin_headers,
+        )
+    assert resp.status_code == 400

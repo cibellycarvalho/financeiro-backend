@@ -1,14 +1,19 @@
 import calendar
+import sys
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, request, jsonify, g
+import anexos
 import db
+import storage
 from auth import require_auth, require_admin
 
 bp = Blueprint("contas", __name__)
 
 FUSO = ZoneInfo("America/Sao_Paulo")
+
+COLUNA_ANEXO = {"nf": "nf_path", "comprovante": "comprovante_path"}
 
 
 def _hoje():
@@ -134,3 +139,49 @@ def atualizar(conta_id):
 def deletar(conta_id):
     db.execute("DELETE FROM fin_contas_pagar WHERE id = %s", (conta_id,))
     return "", 204
+
+
+@bp.post("/<conta_id>/anexo/<tipo>")
+@require_auth
+@require_admin
+def subir_anexo_conta(conta_id, tipo):
+    coluna = COLUNA_ANEXO.get(tipo)
+    if not coluna:
+        return jsonify({"error": "tipo deve ser nf ou comprovante"}), 400
+
+    if not db.query("SELECT id FROM fin_contas_pagar WHERE id = %s", (conta_id,)):
+        return jsonify({"error": "Conta não encontrada"}), 404
+
+    dados, mime, erro = anexos.ler_arquivo_enviado()
+    if erro:
+        return erro
+
+    try:
+        token = anexos.subir_pendente(dados, mime)
+        destino = anexos.destino_anexo("contas", tipo, conta_id, token)
+        storage.mover(token, destino)
+    except storage.StorageErro as e:
+        print(f"[storage] falhou ao guardar {tipo} da conta: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return jsonify({"error": "Não consegui guardar o arquivo. Tente de novo."}), 500
+
+    row = db.execute(
+        f"UPDATE fin_contas_pagar SET {coluna} = %s WHERE id = %s RETURNING {coluna}",
+        (destino, conta_id),
+    )
+    return jsonify({coluna: row[coluna]})
+
+
+@bp.get("/<conta_id>/anexo/<tipo>")
+@require_auth
+def url_anexo_conta(conta_id, tipo):
+    coluna = COLUNA_ANEXO.get(tipo)
+    if not coluna:
+        return jsonify({"error": "tipo deve ser nf ou comprovante"}), 400
+    rows = db.query(f"SELECT {coluna} FROM fin_contas_pagar WHERE id = %s", (conta_id,))
+    if not rows or not rows[0][coluna]:
+        return jsonify({"error": "Sem anexo"}), 404
+    try:
+        return jsonify({"url": storage.url_assinada(rows[0][coluna])})
+    except storage.StorageErro as e:
+        print(f"[storage] falhou ao assinar URL da conta: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return jsonify({"error": "Não consegui abrir o anexo agora."}), 502
