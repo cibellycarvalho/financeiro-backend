@@ -45,6 +45,7 @@ def dashboard():
             SELECT f.nome,
                    COALESCE((SELECT SUM(p.valor_total) FROM fin_pedidos_fornecedor p WHERE p.fornecedor_id = f.id), 0)
                    - COALESCE((SELECT SUM(pg.valor) FROM fin_pagamentos_fornecedor pg WHERE pg.fornecedor_id = f.id), 0)
+                   - COALESCE((SELECT SUM(d.valor) FROM fin_devolucoes_fornecedor d WHERE d.fornecedor_id = f.id), 0)
                    AS saldo_aberto
             FROM fin_fornecedores f
             WHERE f.ativo = true

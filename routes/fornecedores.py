@@ -26,8 +26,9 @@ def _saldo_aberto_fornecedor(fornecedor_id):
         """SELECT
              COALESCE((SELECT SUM(valor_total) FROM fin_pedidos_fornecedor WHERE fornecedor_id = %s), 0)
              - COALESCE((SELECT SUM(valor) FROM fin_pagamentos_fornecedor WHERE fornecedor_id = %s), 0)
+             - COALESCE((SELECT SUM(valor) FROM fin_devolucoes_fornecedor WHERE fornecedor_id = %s), 0)
              AS saldo_aberto""",
-        (fornecedor_id, fornecedor_id)
+        (fornecedor_id, fornecedor_id, fornecedor_id)
     )
     return float(row[0]["saldo_aberto"])
 
@@ -106,6 +107,7 @@ def listar():
         SELECT f.*,
                COALESCE((SELECT SUM(p.valor_total) FROM fin_pedidos_fornecedor p WHERE p.fornecedor_id = f.id), 0)
                - COALESCE((SELECT SUM(pg.valor) FROM fin_pagamentos_fornecedor pg WHERE pg.fornecedor_id = f.id), 0)
+               - COALESCE((SELECT SUM(d.valor) FROM fin_devolucoes_fornecedor d WHERE d.fornecedor_id = f.id), 0)
                AS saldo_aberto
         FROM fin_fornecedores f
         WHERE f.ativo = true
@@ -1013,3 +1015,63 @@ def anexo_nf_pedido(fornecedor_id, pedido_id):
 @require_auth
 def anexo_pagamento(fornecedor_id, pagamento_id):
     return anexos.url_anexo("fin_pagamentos_fornecedor", "fornecedor_id", fornecedor_id, pagamento_id)
+
+
+@bp.get("/<fornecedor_id>/devolucoes")
+@require_auth
+def listar_devolucoes(fornecedor_id):
+    rows = db.query(
+        """SELECT d.*, p.numero_pedido
+           FROM fin_devolucoes_fornecedor d
+           LEFT JOIN fin_pedidos_fornecedor p ON p.id = d.pedido_id
+           WHERE d.fornecedor_id = %s
+           ORDER BY d.data_devolucao, d.created_at""",
+        (fornecedor_id,)
+    )
+    return jsonify(rows)
+
+
+@bp.post("/<fornecedor_id>/devolucoes")
+@require_auth
+@require_admin
+def registrar_devolucao(fornecedor_id):
+    """Abate o 'Ainda devo' sem ser pagamento. Pode passar do saldo em aberto:
+    devolver mais do que se deve deixa crédito com o fornecedor."""
+    data = request.get_json() or {}
+    try:
+        valor = float(data.get("valor"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "valor inválido"}), 400
+    if valor <= 0:
+        return jsonify({"error": "valor deve ser maior que zero"}), 400
+    data_devolucao = data.get("data_devolucao") or ""
+    try:
+        date.fromisoformat(data_devolucao)
+    except ValueError:
+        return jsonify({"error": "data_devolucao obrigatória, no formato AAAA-MM-DD"}), 400
+    if not db.query("SELECT id FROM fin_fornecedores WHERE id = %s AND ativo = true", (fornecedor_id,)):
+        return jsonify({"error": "Fornecedor não encontrado"}), 404
+    pedido_id = (data.get("pedido_id") or "").strip() or None
+    if pedido_id and not _pedido_do_fornecedor(fornecedor_id, pedido_id):
+        return jsonify({"error": "Pedido não encontrado"}), 404
+    descricao = (data.get("descricao") or "").strip() or None
+    row = db.execute(
+        """INSERT INTO fin_devolucoes_fornecedor (fornecedor_id, pedido_id, valor, data_devolucao, descricao)
+           VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+        (fornecedor_id, pedido_id, valor, data_devolucao, descricao)
+    )
+    return jsonify(row), 201
+
+
+@bp.delete("/<fornecedor_id>/devolucoes/<devolucao_id>")
+@require_auth
+@require_admin
+def excluir_devolucao(fornecedor_id, devolucao_id):
+    rows = db.query(
+        "SELECT id FROM fin_devolucoes_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (devolucao_id, fornecedor_id)
+    )
+    if not rows:
+        return jsonify({"error": "Devolução não encontrada"}), 404
+    db.execute("DELETE FROM fin_devolucoes_fornecedor WHERE id = %s", (devolucao_id,))
+    return "", 204
