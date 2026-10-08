@@ -111,12 +111,32 @@ def atualizar(conta_id):
     if "data_pagamento" in data:
         campos.append("data_pagamento = %s")
         params.append(data["data_pagamento"])
+    if "descricao" in data:
+        descricao = (data["descricao"] or "").strip()
+        if not descricao:
+            return jsonify({"error": "descricao obrigatória"}), 400
+        campos.append("descricao = %s")
+        params.append(descricao)
+    if "categoria" in data:
+        if data["categoria"] not in CATEGORIAS_VALIDAS:
+            return jsonify({"error": f"categoria inválida. Valores: {sorted(CATEGORIAS_VALIDAS)}"}), 400
+        campos.append("categoria = %s")
+        params.append(data["categoria"])
+    if "marca" in data:
+        if data["marca"] not in MARCAS_VALIDAS:
+            return jsonify({"error": f"marca inválida. Valores: {sorted(MARCAS_VALIDAS)}"}), 400
+        campos.append("marca = %s")
+        params.append(data["marca"])
     if "observacao" in data:
         campos.append("observacao = %s")
         params.append(data["observacao"])
     if "valor" in data:
+        try:
+            valor = float(data["valor"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "valor inválido"}), 400
         campos.append("valor = %s")
-        params.append(float(data["valor"]))
+        params.append(valor)
     if "vencimento" in data:
         campos.append("vencimento = %s")
         params.append(data["vencimento"])
