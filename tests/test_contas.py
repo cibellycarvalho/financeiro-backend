@@ -90,6 +90,37 @@ def test_marcar_como_pago(client, admin_headers):
     assert resp.status_code == 200
     assert resp.get_json()["status"] == "pago"
 
+def test_editar_conta_manda_todos_os_campos_para_o_update(client, admin_headers):
+    editado = {**CONTA_FIXTURE, "descricao": "DAS Setembro", "categoria": "CONTABILIDADE",
+               "marca": "YUSO", "valor": 400.0, "vencimento": "2026-09-20", "observacao": "corrigido"}
+    with patch("routes.contas.db.execute", return_value=editado) as mock_e:
+        resp = client.put(
+            f"/api/contas/{CONTA_FIXTURE['id']}",
+            json={"descricao": " DAS Setembro ", "categoria": "CONTABILIDADE", "marca": "YUSO",
+                  "valor": "400.00", "vencimento": "2026-09-20", "observacao": "corrigido"},
+            headers=admin_headers,
+        )
+    assert resp.status_code == 200
+    sql, params = mock_e.call_args[0]
+    for coluna in ("descricao", "categoria", "marca", "valor", "vencimento", "observacao"):
+        assert f"{coluna} = %s" in sql
+    assert "DAS Setembro" in params and 400.0 in params
+
+
+def test_editar_conta_rejeita_dado_invalido(client, admin_headers):
+    url = f"/api/contas/{CONTA_FIXTURE['id']}"
+    for corpo in ({"categoria": "INVALIDA"}, {"marca": "XYZ"}, {"descricao": "   "}, {"valor": "abc"}):
+        with patch("routes.contas.db.execute") as mock_e:
+            resp = client.put(url, json=corpo, headers=admin_headers)
+        assert resp.status_code == 400, corpo
+        mock_e.assert_not_called()
+
+
+def test_editar_conta_viewer_negado(client, viewer_headers):
+    resp = client.put("/api/contas/qualquer-id", json={"valor": 1}, headers=viewer_headers)
+    assert resp.status_code == 403
+
+
 def test_delete_conta_viewer_negado(client, viewer_headers):
     resp = client.delete("/api/contas/qualquer-id", headers=viewer_headers)
     assert resp.status_code == 403
