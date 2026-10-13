@@ -26,7 +26,7 @@ def _saldo_aberto_fornecedor(fornecedor_id):
         """SELECT
              COALESCE((SELECT SUM(valor_total) FROM fin_pedidos_fornecedor WHERE fornecedor_id = %s), 0)
              - COALESCE((SELECT SUM(valor) FROM fin_pagamentos_fornecedor WHERE fornecedor_id = %s), 0)
-             - COALESCE((SELECT SUM(valor) FROM fin_devolucoes_fornecedor WHERE fornecedor_id = %s), 0)
+             - COALESCE((SELECT SUM(valor) FROM fin_devolucoes_fornecedor WHERE fornecedor_id = %s AND forma = 'credito'), 0)
              AS saldo_aberto""",
         (fornecedor_id, fornecedor_id, fornecedor_id)
     )
@@ -107,7 +107,7 @@ def listar():
         SELECT f.*,
                COALESCE((SELECT SUM(p.valor_total) FROM fin_pedidos_fornecedor p WHERE p.fornecedor_id = f.id), 0)
                - COALESCE((SELECT SUM(pg.valor) FROM fin_pagamentos_fornecedor pg WHERE pg.fornecedor_id = f.id), 0)
-               - COALESCE((SELECT SUM(d.valor) FROM fin_devolucoes_fornecedor d WHERE d.fornecedor_id = f.id), 0)
+               - COALESCE((SELECT SUM(d.valor) FROM fin_devolucoes_fornecedor d WHERE d.fornecedor_id = f.id AND d.forma = 'credito'), 0)
                AS saldo_aberto
         FROM fin_fornecedores f
         WHERE f.ativo = true
