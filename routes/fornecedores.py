@@ -144,6 +144,31 @@ def pagamentos_do_periodo():
     return jsonify(rows)
 
 
+@bp.get("/devolucoes")
+@require_auth
+def devolucoes_em_dinheiro_do_periodo():
+    """Devoluções que voltaram em dinheiro (Pix/transferência) de qualquer
+    fornecedor entre `de` e `ate`. A Caixa da Semana soma isso à entrada: o
+    crédito (só abate o "Ainda devo") não é dinheiro e fica de fora."""
+    de, ate = request.args.get("de", ""), request.args.get("ate", "")
+    try:
+        if not (re.fullmatch(r"\d{4}-\d{2}-\d{2}", de) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", ate)):
+            raise ValueError
+        date.fromisoformat(de)
+        date.fromisoformat(ate)
+    except ValueError:
+        return jsonify({"error": "de e ate obrigatórios, no formato AAAA-MM-DD"}), 400
+    rows = db.query(
+        """SELECT d.*, f.nome AS fornecedor_nome, f.apelido AS fornecedor_apelido
+           FROM fin_devolucoes_fornecedor d
+           JOIN fin_fornecedores f ON f.id = d.fornecedor_id
+           WHERE d.forma = 'dinheiro' AND d.data_devolucao BETWEEN %s AND %s
+           ORDER BY d.data_devolucao, d.created_at""",
+        (de, ate)
+    )
+    return jsonify(rows)
+
+
 @bp.get("/<fornecedor_id>/pedidos")
 @require_auth
 def listar_pedidos(fornecedor_id):
@@ -1017,6 +1042,17 @@ def anexo_pagamento(fornecedor_id, pagamento_id):
     return anexos.url_anexo("fin_pagamentos_fornecedor", "fornecedor_id", fornecedor_id, pagamento_id)
 
 
+FORMAS_DEVOLUCAO = ("dinheiro", "credito")
+
+
+def _forma_devolucao(valor, padrao="credito"):
+    """'dinheiro' = o fornecedor devolveu por Pix/transferência (entra no caixa);
+    'credito' = só abate o 'Ainda devo'. None se a forma não existe."""
+    forma = (valor or padrao)
+    forma = forma.strip().lower() if isinstance(forma, str) else None
+    return forma if forma in FORMAS_DEVOLUCAO else None
+
+
 @bp.get("/<fornecedor_id>/devolucoes")
 @require_auth
 def listar_devolucoes(fornecedor_id):
@@ -1036,8 +1072,12 @@ def listar_devolucoes(fornecedor_id):
 @require_admin
 def registrar_devolucao(fornecedor_id):
     """Abate o 'Ainda devo' sem ser pagamento. Pode passar do saldo em aberto:
-    devolver mais do que se deve deixa crédito com o fornecedor."""
+    devolver mais do que se deve deixa crédito com o fornecedor. `forma`:
+    'dinheiro' (Pix de volta, entra no caixa) ou 'credito' (padrão, só abate)."""
     data = request.get_json() or {}
+    forma = _forma_devolucao(data.get("forma"))
+    if forma is None:
+        return jsonify({"error": "forma deve ser 'dinheiro' ou 'credito'"}), 400
     try:
         valor = float(data.get("valor"))
     except (TypeError, ValueError):
@@ -1056,11 +1096,68 @@ def registrar_devolucao(fornecedor_id):
         return jsonify({"error": "Pedido não encontrado"}), 404
     descricao = (data.get("descricao") or "").strip() or None
     row = db.execute(
-        """INSERT INTO fin_devolucoes_fornecedor (fornecedor_id, pedido_id, valor, data_devolucao, descricao)
-           VALUES (%s, %s, %s, %s, %s) RETURNING *""",
-        (fornecedor_id, pedido_id, valor, data_devolucao, descricao)
+        """INSERT INTO fin_devolucoes_fornecedor (fornecedor_id, pedido_id, valor, data_devolucao, descricao, forma)
+           VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+        (fornecedor_id, pedido_id, valor, data_devolucao, descricao, forma)
     )
     return jsonify(row), 201
+
+
+@bp.put("/<fornecedor_id>/devolucoes/<devolucao_id>")
+@require_auth
+@require_admin
+def editar_devolucao(fornecedor_id, devolucao_id):
+    """Corrige uma devolução já registrada (valor, data, pedido, descrição ou
+    forma). Só os campos enviados mudam."""
+    atual = db.query(
+        "SELECT * FROM fin_devolucoes_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        (devolucao_id, fornecedor_id)
+    )
+    if not atual:
+        return jsonify({"error": "Devolução não encontrada"}), 404
+    atual = atual[0]
+    data = request.get_json() or {}
+
+    valor = atual["valor"]
+    if "valor" in data:
+        try:
+            valor = float(data["valor"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "valor inválido"}), 400
+        if valor <= 0:
+            return jsonify({"error": "valor deve ser maior que zero"}), 400
+
+    data_devolucao = atual["data_devolucao"]
+    if "data_devolucao" in data:
+        data_devolucao = data["data_devolucao"] or ""
+        try:
+            date.fromisoformat(data_devolucao)
+        except ValueError:
+            return jsonify({"error": "data_devolucao no formato AAAA-MM-DD"}), 400
+
+    forma = atual.get("forma") or "credito"
+    if "forma" in data:
+        forma = _forma_devolucao(data["forma"], padrao=None)
+        if forma is None:
+            return jsonify({"error": "forma deve ser 'dinheiro' ou 'credito'"}), 400
+
+    pedido_id = atual.get("pedido_id")
+    if "pedido_id" in data:
+        pedido_id = (data["pedido_id"] or "").strip() or None
+        if pedido_id and not _pedido_do_fornecedor(fornecedor_id, pedido_id):
+            return jsonify({"error": "Pedido não encontrado"}), 404
+
+    descricao = atual.get("descricao")
+    if "descricao" in data:
+        descricao = (data["descricao"] or "").strip() or None
+
+    row = db.execute(
+        """UPDATE fin_devolucoes_fornecedor
+              SET valor = %s, data_devolucao = %s, forma = %s, pedido_id = %s, descricao = %s
+            WHERE id = %s AND fornecedor_id = %s RETURNING *""",
+        (valor, data_devolucao, forma, pedido_id, descricao, devolucao_id, fornecedor_id)
+    )
+    return jsonify(row)
 
 
 @bp.delete("/<fornecedor_id>/devolucoes/<devolucao_id>")
