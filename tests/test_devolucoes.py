@@ -109,3 +109,12 @@ def test_devolucoes_em_dinheiro_do_periodo(client, admin_headers):
 def test_devolucoes_do_periodo_exige_datas_validas(client, admin_headers):
     resp = client.get("/api/fornecedores/devolucoes?de=ontem&ate=2026-10-18", headers=admin_headers)
     assert resp.status_code == 400
+
+
+def test_so_credito_abate_o_saldo_devedor():
+    """Dinheiro de volta desfaz um pagamento: a dívida continua a mesma. Se
+    abatesse de novo, quem já pagou ficava com "Ainda devo" negativo."""
+    import routes.fornecedores as f
+    with patch("routes.fornecedores.db.query", return_value=[{"saldo_aberto": 0}]) as q:
+        f._saldo_aberto_fornecedor(FORN)
+    assert "forma = 'credito'" in q.call_args[0][0]
