@@ -105,3 +105,27 @@ def test_retirada_da_reserva_negativa_400(client, admin_headers):
     r = client.put(f"/api/planejamento/{SEMANA}", headers=admin_headers, json={"retirada_reserva": -1})
     assert r.status_code == 400
     assert "retirada_reserva" in r.get_json()["error"]
+
+
+def test_gravar_entradas_extras(client, admin_headers):
+    with patch("routes.planejamento.db.execute", return_value=LINHA) as ex:
+        r = client.put(f"/api/planejamento/{SEMANA}", headers=admin_headers, json={
+            "saldo_conta": 1, "retirada_reserva": 0, "entradas_extras": 20000,
+            "agenda": {}, "ajustes_pagamento": {},
+        })
+    assert r.status_code == 200
+    sql, params = ex.call_args[0]
+    assert "entradas_extras = EXCLUDED.entradas_extras" in sql
+    assert params[5] == 20000.0
+
+
+def test_entradas_extras_negativa_400(client, admin_headers):
+    r = client.put(f"/api/planejamento/{SEMANA}", headers=admin_headers, json={"entradas_extras": -5})
+    assert r.status_code == 400
+    assert "entradas_extras" in r.get_json()["error"]
+
+
+def test_ler_semana_vazia_traz_entradas_extras_nulas(client, admin_headers):
+    with patch("routes.planejamento.db.query", return_value=[]):
+        r = client.get(f"/api/planejamento/{SEMANA}", headers=admin_headers)
+    assert r.get_json()["entradas_extras"] is None
