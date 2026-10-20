@@ -24,7 +24,7 @@ class _ErroAmarracao(Exception):
 def _saldo_aberto_fornecedor(fornecedor_id):
     row = db.query(
         """SELECT
-             COALESCE((SELECT SUM(valor_total) FROM fin_pedidos_fornecedor WHERE fornecedor_id = %s), 0)
+             COALESCE((SELECT SUM(valor_total - desconto) FROM fin_pedidos_fornecedor WHERE fornecedor_id = %s), 0)
              - COALESCE((SELECT SUM(valor) FROM fin_pagamentos_fornecedor WHERE fornecedor_id = %s), 0)
              - COALESCE((SELECT SUM(valor) FROM fin_devolucoes_fornecedor WHERE fornecedor_id = %s AND forma = 'credito'), 0)
              AS saldo_aberto""",
@@ -105,7 +105,7 @@ def excluir_fornecedor(fornecedor_id):
 def listar():
     rows = db.query("""
         SELECT f.*,
-               COALESCE((SELECT SUM(p.valor_total) FROM fin_pedidos_fornecedor p WHERE p.fornecedor_id = f.id), 0)
+               COALESCE((SELECT SUM(p.valor_total - p.desconto) FROM fin_pedidos_fornecedor p WHERE p.fornecedor_id = f.id), 0)
                - COALESCE((SELECT SUM(pg.valor) FROM fin_pagamentos_fornecedor pg WHERE pg.fornecedor_id = f.id), 0)
                - COALESCE((SELECT SUM(d.valor) FROM fin_devolucoes_fornecedor d WHERE d.fornecedor_id = f.id AND d.forma = 'credito'), 0)
                AS saldo_aberto
@@ -538,7 +538,7 @@ def excluir_item(fornecedor_id, pedido_id, item_id):
 
 def _pedido_do_fornecedor(fornecedor_id, pedido_id):
     rows = db.query(
-        "SELECT id, valor_total, pago_em FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
+        "SELECT id, valor_total, desconto, pago_em FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
         (pedido_id, fornecedor_id)
     )
     return rows[0] if rows else None
@@ -569,7 +569,8 @@ def marcar_pedido_pago(fornecedor_id, pedido_id):
         return jsonify({"error": "Pedido não encontrado"}), 404
     if pedido["pago_em"]:
         return jsonify({"error": "Esse pedido já está marcado como pago"}), 409
-    valor = float(pedido["valor_total"])
+    # Com desconto, o que se paga é o valor do pedido menos o desconto.
+    valor = float(pedido["valor_total"]) - float(pedido.get("desconto") or 0)
 
     if modo == "lancar":
         saldo_aberto = _saldo_aberto_fornecedor(fornecedor_id)
@@ -607,7 +608,7 @@ def marcar_pedido_pago(fornecedor_id, pedido_id):
     livre = db.query(
         """SELECT
              COALESCE((SELECT SUM(valor) FROM fin_pagamentos_fornecedor WHERE fornecedor_id = %s), 0)
-             - COALESCE((SELECT SUM(valor_total) FROM fin_pedidos_fornecedor
+             - COALESCE((SELECT SUM(valor_total - desconto) FROM fin_pedidos_fornecedor
                          WHERE fornecedor_id = %s AND pago_em IS NOT NULL), 0) AS livre""",
         (fornecedor_id, fornecedor_id)
     )
@@ -618,6 +619,54 @@ def marcar_pedido_pago(fornecedor_id, pedido_id):
     atualizado = db.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s RETURNING *",
                             (data_pagamento, pedido_id))
     return jsonify(atualizado), 201
+
+
+@bp.post("/<fornecedor_id>/pedidos/<pedido_id>/desconto")
+@require_auth
+@require_admin
+def aplicar_desconto(fornecedor_id, pedido_id):
+    """Registra que o fornecedor deu desconto no pedido.
+
+    Sem `valor`, o desconto é a diferença entre o pedido e o que já foi pago a
+    ele (o caso "o Pix saiu menor que o pedido"). Com `valor`, é esse número.
+    Nunca passa do que ainda falta pagar: desconto maior que a dívida
+    inventaria crédito.
+    """
+    pedido = _pedido_do_fornecedor(fornecedor_id, pedido_id)
+    if not pedido:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+    amarrado = float(db.query(
+        "SELECT COALESCE(SUM(valor), 0) AS v FROM fin_pagamento_pedido WHERE pedido_id = %s",
+        (pedido_id,))[0]["v"])
+    falta = round(float(pedido["valor_total"]) - amarrado, 2)
+
+    data = request.get_json(silent=True) or {}
+    if data.get("valor") is None:
+        valor = falta
+    else:
+        try:
+            valor = round(float(data["valor"]), 2)
+        except (TypeError, ValueError):
+            return jsonify({"error": "valor inválido"}), 400
+    if valor <= 0:
+        return jsonify({"error": "Não há diferença a descontar: o pedido já está coberto."}), 400
+    if valor > falta + 0.005:
+        return jsonify({"error": f"O desconto (R$ {valor:.2f}) passa do que falta pagar (R$ {falta:.2f})."}), 400
+
+    atualizado = db.execute(
+        "UPDATE fin_pedidos_fornecedor SET desconto = %s WHERE id = %s RETURNING *",
+        (valor, pedido_id))
+    return jsonify(atualizado)
+
+
+@bp.delete("/<fornecedor_id>/pedidos/<pedido_id>/desconto")
+@require_auth
+@require_admin
+def desfazer_desconto(fornecedor_id, pedido_id):
+    if not _pedido_do_fornecedor(fornecedor_id, pedido_id):
+        return jsonify({"error": "Pedido não encontrado"}), 404
+    db.execute("UPDATE fin_pedidos_fornecedor SET desconto = 0 WHERE id = %s RETURNING *", (pedido_id,))
+    return "", 204
 
 
 @bp.delete("/<fornecedor_id>/pedidos/<pedido_id>/pago")

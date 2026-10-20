@@ -40,7 +40,7 @@ class BancoFake:
 
     def add_pedido(self, id, valor_total, pago_em=None):
         self.pedidos[id] = {"id": id, "fornecedor_id": F_ID,
-                            "valor_total": valor_total, "pago_em": pago_em}
+                            "valor_total": valor_total, "desconto": 0, "pago_em": pago_em}
 
     def links_do_pedido(self, pedido_id):
         return [l for l in self.links if l["pedido_id"] == pedido_id]
@@ -67,7 +67,7 @@ class BancoFake:
             pg = self.pagamentos.get(p[0])
             return [{"valor": pg["valor"]}] if pg else []
 
-        if "SELECT id, valor_total, pago_em FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id" in s:
+        if "SELECT id, valor_total, desconto, pago_em FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id" in s:
             ped = self.pedidos.get(p[0])
             return [dict(ped)] if ped and ped["fornecedor_id"] == p[1] else []
 
