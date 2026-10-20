@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify, g
-from datetime import date
+from datetime import date, timedelta
 import calendar
 import requests as http_req
 import db
@@ -176,4 +176,75 @@ def saldo():
         "cobranças_ml": cobranças_ml,
         "contas_pagas": contas_pagas,
         "saldo_disponivel": repasses_bruto - cobranças_ml - contas_pagas
+    })
+
+
+def agrupar_a_liberar(pagamentos, de, ate):
+    """Soma o líquido (net_received_amount) por dia de liberação.
+
+    Só entra pagamento aprovado cuja liberação cai em [de, ate] (datas ISO).
+    Pagamento sem money_release_date ou sem líquido é ignorado.
+    """
+    por_dia = {}
+    for p in pagamentos:
+        if p.get("status") != "approved":
+            continue
+        dia = (p.get("money_release_date") or "")[:10]
+        if not dia or not (de <= dia <= ate):
+            continue
+        liquido = (p.get("transaction_details") or {}).get("net_received_amount")
+        if liquido is None:
+            liquido = p.get("net_received_amount")
+        if liquido is None:
+            continue
+        por_dia[dia] = round(por_dia.get(dia, 0) + float(liquido), 2)
+    return por_dia
+
+
+@bp.get("/a-liberar")
+@require_auth
+def a_liberar():
+    """Agenda de valores a liberar no Mercado Pago, por dia (substitui colar a
+    agenda à mão). ?de=YYYY-MM-DD&ate=YYYY-MM-DD (padrão: hoje + 14 dias)."""
+    token = config.MERCADO_PAGO_ACCESS_TOKEN
+    if not token:
+        return jsonify({"error": "MERCADO_PAGO_ACCESS_TOKEN não configurado"}), 503
+
+    hoje = date.today()
+    de = request.args.get("de", hoje.isoformat())
+    ate = request.args.get("ate", (hoje + timedelta(days=14)).isoformat())
+    try:
+        date.fromisoformat(de)
+        date.fromisoformat(ate)
+    except ValueError:
+        return jsonify({"error": "de/ate devem ser YYYY-MM-DD"}), 400
+    if ate < de:
+        return jsonify({"error": "ate deve ser depois de de"}), 400
+
+    pagamentos, offset, limit = [], 0, 100
+    while True:
+        resp = http_req.get(
+            "https://api.mercadopago.com/v1/payments/search",
+            headers={"Authorization": f"Bearer {token}"},
+            params={
+                "sort": "money_release_date", "criteria": "asc",
+                "range": "money_release_date",
+                "begin_date": f"{de}T00:00:00.000-03:00",
+                "end_date": f"{ate}T23:59:59.999-03:00",
+                "status": "approved", "limit": limit, "offset": offset,
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return jsonify({"error": "Erro na API do Mercado Pago", "detail": resp.text[:300]}), 502
+        corpo = resp.json()
+        pagamentos.extend(corpo.get("results", []))
+        if offset + limit >= corpo.get("paging", {}).get("total", 0):
+            break
+        offset += limit
+
+    por_dia = agrupar_a_liberar(pagamentos, de, ate)
+    return jsonify({
+        "de": de, "ate": ate, "por_dia": por_dia,
+        "total": round(sum(por_dia.values()), 2), "pagamentos": len(pagamentos),
     })
