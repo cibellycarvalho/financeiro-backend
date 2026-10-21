@@ -26,3 +26,18 @@ def test_casar_skus_descarta_metragem_diferente(mocker):
     cat = {"FV10M": ["Cabo Hdmi Fibra 10m 8k"], "1017": ["Fonte 5v 2a Bivolt"]}
     achados = leitura_documento.casar_skus(["FIBRA HDMI 20M 8K", "FONTE 5V 2A", "OUTRA"], cat)
     assert achados == {1: "1017"}
+
+
+def test_confirmar_kit_recusa_sku_avulso_que_nao_existe(client, admin_headers, mocker):
+    mocker.patch("routes.fornecedores.db.query", return_value=[])
+    confirmar = mocker.patch("routes.fornecedores.kits.confirmar")
+    r = client.put("/api/fornecedores/kits/00002", headers=admin_headers, json={"unidades": 2, "sku_base": "0.01"})
+    assert r.status_code == 400 and "0.01" in r.get_json()["error"]
+    confirmar.assert_not_called()
+
+
+def test_confirmar_kit_com_sku_avulso_que_existe(client, admin_headers, mocker):
+    mocker.patch("routes.fornecedores.db.query", return_value=[(1,)])
+    mocker.patch("routes.fornecedores.kits.confirmar", return_value={"sku": "FV0060"})
+    r = client.put("/api/fornecedores/kits/FV0060", headers=admin_headers, json={"unidades": 10, "sku_base": "1017"})
+    assert r.status_code == 200
