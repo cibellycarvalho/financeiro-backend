@@ -282,6 +282,8 @@ def confirmar_kit(sku):
         return jsonify({"error": erro}), 400
     if base == sku_n:
         return jsonify({"error": "o kit não pode ser feito dele mesmo"}), 400
+    if base and not db.query("SELECT 1 FROM ml_anuncios WHERE upper(sku) = %s LIMIT 1", (base,)):
+        return jsonify({"error": f"o SKU {base} não existe no CRM"}), 400
     try:
         unidades = float(data.get("unidades"))
     except (TypeError, ValueError):
