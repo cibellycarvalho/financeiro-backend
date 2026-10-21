@@ -8,6 +8,7 @@ import anexos
 from anexos import MSG_LEITURA_INDISPONIVEL, MSG_ANEXO_NAO_GUARDADO
 import db
 import aliases
+import custo_pedido
 import leitura_documento
 import storage
 from auth import require_auth, require_admin
@@ -116,6 +117,18 @@ def listar():
     return jsonify(rows)
 
 
+@bp.get("/skus")
+@require_auth
+def listar_skus():
+    """SKUs do CRM para ela escolher no item do pedido, com um título de
+    exemplo para reconhecer o produto."""
+    return jsonify(db.query(
+        """SELECT DISTINCT ON (upper(sku)) upper(sku) AS sku, conta_ml, titulo
+             FROM ml_anuncios WHERE sku IS NOT NULL AND sku <> ''
+            ORDER BY upper(sku), (status_ml = 'active') DESC, criado_em DESC"""
+    ))
+
+
 @bp.get("/pagamentos")
 @require_auth
 def pagamentos_do_periodo():
@@ -207,6 +220,31 @@ def _aprender_alias_silencioso(fornecedor_id, texto, origem):
         print(f"[aliases] falhou ao aprender '{texto[:60]}' ({origem}): {type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
 
+def _atualizar_custos(fornecedor_id, data_pedido, itens):
+    """Leva o custo de cada item com SKU para o CRM e aprende o SKU do produto.
+    Roda depois do pedido gravado: falhar aqui nunca desfaz o pedido, só fica
+    contado na resposta para a tela avisar. `data_pedido` pode ser a função que
+    a busca, para não ir ao banco quando nenhum item tem SKU."""
+    resultado = []
+    for item in itens:
+        sku = item.get("sku")
+        if not sku:
+            continue
+        try:
+            if callable(data_pedido):
+                data_pedido = data_pedido()
+            custo_pedido.aprender_sku(fornecedor_id, item.get("produto"), sku)
+            resultado.append(custo_pedido.aplicar(item["id"], sku, item["valor_unitario"], data_pedido))
+        except Exception as e:
+            print(f"[custo_pedido] falhou no SKU {sku}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            resultado.append({"sku": sku, "status": "erro"})
+    return resultado
+
+
+def _data_do_pedido(pedido_id):
+    return lambda: db.query("SELECT data_pedido FROM fin_pedidos_fornecedor WHERE id = %s", (pedido_id,))[0]["data_pedido"]
+
+
 @bp.post("/<fornecedor_id>/pedidos/ler")
 @require_auth
 @require_admin
@@ -261,7 +299,8 @@ def ler_pedido_arquivo(fornecedor_id):
         "texto_vendedor": lido["texto_vendedor"],
         "numero_pedido": lido["numero_pedido"],
         "data_pedido": lido["data_pedido"],
-        "itens": lido["itens"],
+        # O SKU que ela já ligou a este produto deste fornecedor em pedido anterior.
+        "itens": [{**i, "sku": custo_pedido.sugerir_sku(fornecedor_id, i["produto"])} for i in lido["itens"]],
         "total_documento": lido["total_documento"],
         "pedido_existente": existente,
     })
@@ -364,6 +403,7 @@ def criar_pedido(fornecedor_id):
     _aprender_alias_silencioso(fornecedor_id, alias_vendedor, "vendedor")
 
     pedido["itens"] = itens_criados
+    pedido["custos"] = _atualizar_custos(fornecedor_id, data["data_pedido"], itens_criados)
     return jsonify(pedido), 201
 
 
@@ -469,6 +509,7 @@ def adicionar_item(fornecedor_id, pedido_id):
         pedido_atualizado = dict(cur.fetchone())
 
     pedido_atualizado["item"] = item
+    pedido_atualizado["custos"] = _atualizar_custos(fornecedor_id, _data_do_pedido(pedido_id), [item])
     return jsonify(pedido_atualizado), 201
 
 
@@ -519,6 +560,7 @@ def editar_item(fornecedor_id, pedido_id, item_id):
         pedido_atualizado = dict(cur.fetchone())
 
     pedido_atualizado["item"] = item
+    pedido_atualizado["custos"] = _atualizar_custos(fornecedor_id, _data_do_pedido(pedido_id), [item])
     return jsonify(pedido_atualizado)
 
 

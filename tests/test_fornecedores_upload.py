@@ -33,6 +33,7 @@ def storage_mock(mocker):
 
 def test_ler_pedido_devolve_rascunho_com_sugestao_e_token(client, admin_headers, mocker):
     mocker.patch("routes.fornecedores.leitura_documento.ler_pedido", return_value=LIDO_PEDIDO)
+    mocker.patch("routes.fornecedores.custo_pedido.sugerir_sku", return_value=None)
     mocker.patch("routes.fornecedores.aliases.sugerir_fornecedor", return_value=OUTRO)
     mocker.patch("routes.fornecedores.db.query", return_value=[])
 
@@ -44,7 +45,7 @@ def test_ler_pedido_devolve_rascunho_com_sugestao_e_token(client, admin_headers,
     assert corpo["fornecedor_sugerido_id"] == OUTRO
     assert corpo["texto_vendedor"] == "Flavia"
     assert corpo["numero_pedido"] == "2026/9001"
-    assert corpo["itens"] == LIDO_PEDIDO["itens"]
+    assert corpo["itens"] == [{**i, "sku": None} for i in LIDO_PEDIDO["itens"]]
     assert corpo["total_documento"] == 20.0
     assert corpo["pedido_existente"] is None
     assert corpo["arquivo_token"] == "pendentes/abc.pdf"
@@ -52,6 +53,7 @@ def test_ler_pedido_devolve_rascunho_com_sugestao_e_token(client, admin_headers,
 
 def test_ler_pedido_avisa_pedido_existente_no_mesmo_fornecedor(client, admin_headers, mocker):
     mocker.patch("routes.fornecedores.leitura_documento.ler_pedido", return_value=LIDO_PEDIDO)
+    mocker.patch("routes.fornecedores.custo_pedido.sugerir_sku", return_value=None)
     mocker.patch("routes.fornecedores.aliases.sugerir_fornecedor", return_value=None)
     query = mocker.patch("routes.fornecedores.db.query",
                          return_value=[{"id": "p-1", "data_pedido": "2026-09-01"}])
@@ -114,6 +116,7 @@ def test_ler_pedido_viewer_403(client, viewer_headers):
 def test_ler_pedido_storage_falhou_ainda_devolve_a_leitura(client, admin_headers, mocker):
     """Perder o Storage não pode custar a leitura: ela lança sem anexo."""
     mocker.patch("routes.fornecedores.leitura_documento.ler_pedido", return_value=LIDO_PEDIDO)
+    mocker.patch("routes.fornecedores.custo_pedido.sugerir_sku", return_value=None)
     mocker.patch("routes.fornecedores.aliases.sugerir_fornecedor", return_value=None)
     mocker.patch("routes.fornecedores.db.query", return_value=[])
     mocker.patch("routes.fornecedores.storage.enviar_pendente", side_effect=storage.StorageErro("x"))
@@ -123,7 +126,7 @@ def test_ler_pedido_storage_falhou_ainda_devolve_a_leitura(client, admin_headers
     corpo = r.get_json()
     assert corpo["arquivo_token"] is None
     assert "sem o anexo" in corpo["aviso"]
-    assert corpo["itens"] == LIDO_PEDIDO["itens"]
+    assert corpo["itens"] == [{**i, "sku": None} for i in LIDO_PEDIDO["itens"]]
 
 
 def test_ler_comprovante_storage_falhou_ainda_devolve_a_leitura(client, admin_headers, mocker):
