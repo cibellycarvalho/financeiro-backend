@@ -177,7 +177,7 @@ def listar_pedidos(fornecedor_id):
                    COALESCE(
                      (SELECT json_agg(
                         json_build_object(
-                          'id', i.id, 'produto', i.produto, 'quantidade', i.quantidade,
+                          'id', i.id, 'produto', i.produto, 'sku', i.sku, 'quantidade', i.quantidade,
                           'valor_unitario', i.valor_unitario, 'valor_total', i.valor_total
                         ) ORDER BY i.created_at
                       ) FROM fin_pedido_itens i WHERE i.pedido_id = p.id), '[]'
@@ -267,6 +267,18 @@ def ler_pedido_arquivo(fornecedor_id):
     })
 
 
+def _normalizar_sku(valor):
+    """SKU do item (ex.: FV0073) é opcional. Liga a compra ao produto do CRM
+    para o painel saber o que já foi comprado e ainda não foi enviado ao Full.
+    Devolve (sku ou None, erro)."""
+    sku = (str(valor).strip().upper() if valor is not None else "")
+    if not sku:
+        return None, None
+    if len(sku) > 40 or not re.fullmatch(r"[A-Z0-9._-]+", sku):
+        return None, "sku inválido: use só letras, números, ponto, hífen ou sublinhado (ex.: FV0073)"
+    return sku, None
+
+
 def _validar_itens(itens):
     """Valida a lista de itens do pedido. Retorna (itens_validados, erro)."""
     if not itens or not isinstance(itens, list):
@@ -286,7 +298,10 @@ def _validar_itens(itens):
             return None, "quantidade deve ser maior que zero"
         if valor_unitario < 0:
             return None, "valor_unitario não pode ser negativo"
-        itens_validados.append((produto, quantidade, valor_unitario))
+        sku, erro_sku = _normalizar_sku(item.get("sku"))
+        if erro_sku:
+            return None, erro_sku
+        itens_validados.append((produto, quantidade, valor_unitario, sku))
     return itens_validados, None
 
 
@@ -303,7 +318,7 @@ def criar_pedido(fornecedor_id):
     if erro:
         return jsonify({"error": erro}), 400
 
-    valor_total = sum(quantidade * valor_unitario for _, quantidade, valor_unitario in itens_validados)
+    valor_total = sum(quantidade * valor_unitario for _, quantidade, valor_unitario, _sku in itens_validados)
     numero_pedido = (data.get("numero_pedido") or "").strip() or None
     arquivo_token = (data.get("arquivo_token") or "").strip() or None
     alias_vendedor = data.get("alias_vendedor")
@@ -324,12 +339,12 @@ def criar_pedido(fornecedor_id):
             pedido = dict(cur.fetchone())
 
             itens_criados = []
-            for produto, quantidade, valor_unitario in itens_validados:
+            for produto, quantidade, valor_unitario, sku in itens_validados:
                 cur.execute(
-                    """INSERT INTO fin_pedido_itens (pedido_id, produto, quantidade, valor_unitario)
-                       VALUES (%s, %s, %s, %s)
+                    """INSERT INTO fin_pedido_itens (pedido_id, produto, quantidade, valor_unitario, sku)
+                       VALUES (%s, %s, %s, %s, %s)
                        RETURNING *""",
-                    (pedido["id"], produto, quantidade, valor_unitario)
+                    (pedido["id"], produto, quantidade, valor_unitario, sku)
                 )
                 itens_criados.append(dict(cur.fetchone()))
 
@@ -427,7 +442,7 @@ def adicionar_item(fornecedor_id, pedido_id):
     itens_validados, erro = _validar_itens([data])
     if erro:
         return jsonify({"error": erro}), 400
-    produto, quantidade, valor_unitario = itens_validados[0]
+    produto, quantidade, valor_unitario, sku = itens_validados[0]
 
     pedidos = db.query(
         "SELECT id FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
@@ -438,10 +453,10 @@ def adicionar_item(fornecedor_id, pedido_id):
 
     with db.transaction() as cur:
         cur.execute(
-            """INSERT INTO fin_pedido_itens (pedido_id, produto, quantidade, valor_unitario)
-               VALUES (%s, %s, %s, %s)
+            """INSERT INTO fin_pedido_itens (pedido_id, produto, quantidade, valor_unitario, sku)
+               VALUES (%s, %s, %s, %s, %s)
                RETURNING *""",
-            (pedido_id, produto, quantidade, valor_unitario)
+            (pedido_id, produto, quantidade, valor_unitario, sku)
         )
         item = dict(cur.fetchone())
         cur.execute(
@@ -465,7 +480,7 @@ def editar_item(fornecedor_id, pedido_id, item_id):
     itens_validados, erro = _validar_itens([data])
     if erro:
         return jsonify({"error": erro}), 400
-    produto, quantidade, valor_unitario = itens_validados[0]
+    produto, quantidade, valor_unitario, sku = itens_validados[0]
 
     pedidos = db.query(
         "SELECT id FROM fin_pedidos_fornecedor WHERE id = %s AND fornecedor_id = %s",
@@ -489,6 +504,11 @@ def editar_item(fornecedor_id, pedido_id, item_id):
             (produto, quantidade, valor_unitario, item_id, pedido_id)
         )
         item = dict(cur.fetchone())
+        # O SKU só muda quando a tela o manda: editar quantidade ou valor não
+        # pode apagar o SKU que já estava lá.
+        if "sku" in data:
+            cur.execute("UPDATE fin_pedido_itens SET sku = %s WHERE id = %s RETURNING sku", (sku, item_id))
+            item["sku"] = cur.fetchone()["sku"]
         cur.execute(
             """UPDATE fin_pedidos_fornecedor
                SET valor_total = (SELECT COALESCE(SUM(valor_total), 0) FROM fin_pedido_itens WHERE pedido_id = %s)
