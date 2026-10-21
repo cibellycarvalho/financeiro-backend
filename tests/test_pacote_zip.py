@@ -445,3 +445,26 @@ def test_dockerfile_da_tempo_do_zip_do_mes_ficar_pronto():
     from pathlib import Path
     texto = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text()
     assert '"--timeout", "300"' in texto
+
+
+def test_periodo_busca_do_primeiro_ao_ultimo_dia(client, admin_headers):
+    linhas = [{
+        "fornecedor": "FLAVIA", "data_compra": "2026-08-17", "numero_pedido": "1234",
+        "valor": 30000.0, "nf_path": None, "pedido_path": None, "comprovantes": [],
+    }]
+    with patch("routes.pacote._compras_do_mes", return_value=linhas) as busca:
+        resp = client.get("/api/pacote/compras/2026-07?ate=2026-09", headers=admin_headers)
+    assert resp.status_code == 200
+    busca.assert_called_once_with("2026-07-01", "2026-09-30")
+    assert "compras-2026-07_a_2026-09.zip" in resp.headers["Content-Disposition"]
+
+
+def test_periodo_invertido_da_400(client, admin_headers):
+    resp = client.get("/api/pacote/compras/2026-09?ate=2026-07", headers=admin_headers)
+    assert resp.status_code == 400
+
+
+def test_periodo_acima_de_12_meses_da_400(client, admin_headers):
+    resp = client.get("/api/pacote/compras/2025-01?ate=2026-01", headers=admin_headers)
+    assert resp.status_code == 400
+    assert "12 meses" in resp.get_json()["error"]
