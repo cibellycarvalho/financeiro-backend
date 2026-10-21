@@ -3,7 +3,7 @@ import calendar
 import re
 from datetime import date
 
-from flask import Blueprint, jsonify, Response
+from flask import Blueprint, jsonify, request, Response
 
 import db
 import pacote_zip
@@ -71,24 +71,48 @@ def _compras_do_mes(inicio, fim):
     return list(pedidos) + list(contas)
 
 
+# Teto do período: o zip é montado inteiro na memória (ver pacote_zip), então
+# um ano de compras é o máximo que a gente aceita de uma vez.
+MAX_MESES = 12
+
+
+def _mes(texto):
+    """'AAAA-MM' -> (ano, mês), ou None se não for um mês válido."""
+    if not texto or not re.fullmatch(r"\d{4}-\d{2}", texto):
+        return None
+    ano, m = int(texto[:4]), int(texto[5:])
+    if not 1 <= m <= 12 or not 2000 <= ano <= 2100:
+        return None
+    return ano, m
+
+
 @bp.get("/compras/<mes>")
 @require_auth
 def baixar_compras(mes):
-    if not re.fullmatch(r"\d{4}-\d{2}", mes):
+    """Um mês só, ou um período com `?ate=AAAA-MM` (de `mes` até `ate`)."""
+    de = _mes(mes)
+    ate_txt = request.args.get("ate") or mes
+    ate = _mes(ate_txt)
+    if not de or not ate:
         return jsonify({"error": "mês no formato AAAA-MM"}), 400
-    ano, m = int(mes[:4]), int(mes[5:])
-    if not 1 <= m <= 12 or not 2000 <= ano <= 2100:
-        return jsonify({"error": "mês no formato AAAA-MM"}), 400
-    inicio = date(ano, m, 1)
-    fim = date(ano, m, calendar.monthrange(ano, m)[1])
+    if ate < de:
+        return jsonify({"error": "O mês final vem antes do inicial."}), 400
+    qtd = (ate[0] - de[0]) * 12 + (ate[1] - de[1]) + 1
+    if qtd > MAX_MESES:
+        return jsonify({"error": f"Período máximo de {MAX_MESES} meses."}), 400
+
+    inicio = date(de[0], de[1], 1)
+    fim = date(ate[0], ate[1], calendar.monthrange(*ate)[1])
+    rotulo = mes if ate_txt == mes else f"{mes}_a_{ate_txt}"
 
     compras = _compras_do_mes(inicio.isoformat(), fim.isoformat())
     if not compras:
-        return jsonify({"error": f"Nenhuma compra em {mes}."}), 404
+        periodo = mes if ate_txt == mes else f"{mes} a {ate_txt}"
+        return jsonify({"error": f"Nenhuma compra em {periodo}."}), 404
 
     conteudo = pacote_zip.montar(compras)
     return Response(
         conteudo,
         mimetype="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="compras-{mes}.zip"'},
+        headers={"Content-Disposition": f'attachment; filename="compras-{rotulo}.zip"'},
     )
