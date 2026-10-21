@@ -200,8 +200,9 @@ def _chamar(dados, mime, instrucao, esquema):
         resp = client.messages.create(
             model=config.LEITURA_MODEL,
             max_tokens=16000,
-            messages=[{"role": "user", "content": [_bloco_arquivo(dados, mime),
-                                                   {"type": "text", "text": instrucao}]}],
+            # Sem arquivo (dados None) é pergunta só de texto, como casar SKU.
+            messages=[{"role": "user", "content": ([_bloco_arquivo(dados, mime)] if dados is not None else [])
+                                                  + [{"type": "text", "text": instrucao}]}],
             output_config={"format": {"type": "json_schema", "schema": esquema}},
         )
     except anthropic.AuthenticationError as e:
@@ -306,3 +307,66 @@ def ler_nota_fiscal(dados, mime):
         "cnpj_prestador": _cnpj_ou_none(bruto.get("cnpj_prestador")),
         "nome_prestador": (bruto.get("nome_prestador") or "").strip() or None,
     }
+
+
+ESQUEMA_CASAR_SKU = {
+    "type": "object",
+    "properties": {
+        "itens": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "indice": {"type": "integer"},
+                    "sku": {"type": ["string", "null"]},
+                },
+                "required": ["indice", "sku"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["itens"],
+    "additionalProperties": False,
+}
+
+INSTRUCAO_CASAR_SKU = (
+    "Abaixo estão produtos de um pedido de compra de fornecedor e o catálogo de "
+    "SKUs da loja, cada um com títulos de anúncio. Para cada produto do pedido, "
+    "diga o SKU do MESMO produto, ou null. Regras: metragem, potência, voltagem, "
+    "resolução e conector têm que ser iguais (cabo de 20 m não é o de 10 m). Na "
+    "dúvida, null — é melhor deixar vazio do que errar. Prefira o SKU do produto "
+    "avulso a um kit; só escolha um kit se não houver o avulso.\n\n"
+)
+
+_RE_MEDIDA = re.compile(r"(\d+(?:[.,]\d+)?)\s*(m|mt|mts|metros?|cm|w|v|a)\b", re.IGNORECASE)
+
+
+def _medidas(texto):
+    unidade = {"mt": "m", "mts": "m", "metro": "m", "metros": "m"}
+    return {(format(float(n.replace(",", ".")), "g"), unidade.get(u.lower(), u.lower())) for n, u in _RE_MEDIDA.findall(texto or "")}
+
+
+def medidas_batem(produto, titulos):
+    """Trava que não depende do modelo: toda medida do produto do pedido tem que
+    aparecer em algum título do SKU. Foi assim que o cabo de 20 m virou o de 10 m
+    numa análise antiga."""
+    do_produto = _medidas(produto)
+    if not do_produto:
+        return True
+    return any(do_produto <= _medidas(t) for t in titulos)
+
+
+def casar_skus(produtos, catalogo):
+    """produtos: lista de nomes; catalogo: {sku: [títulos]}. Devolve {índice: sku}."""
+    linhas_pedido = "\n".join(f"{i}: {p}" for i, p in enumerate(produtos))
+    linhas_cat = "\n".join(f"{sku}: " + " | ".join(t[:90] for t in titulos[:2]) for sku, titulos in catalogo.items())
+    bruto = _chamar(None, None, INSTRUCAO_CASAR_SKU + "PEDIDO:\n" + linhas_pedido + "\n\nCATÁLOGO:\n" + linhas_cat,
+                    ESQUEMA_CASAR_SKU)
+    achados = {}
+    for item in bruto.get("itens") or []:
+        i, sku = item.get("indice"), item.get("sku")
+        if not isinstance(i, int) or not (0 <= i < len(produtos)) or sku not in catalogo:
+            continue
+        if medidas_batem(produtos[i], catalogo[sku]):
+            achados[i] = sku
+    return achados

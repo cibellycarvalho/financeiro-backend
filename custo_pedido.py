@@ -16,6 +16,7 @@ preço de agosto.
 """
 import aliases
 import db
+import kits
 
 NF = 0.02
 
@@ -46,10 +47,55 @@ def aprender_sku(fornecedor_id, produto, sku):
     )
 
 
+def _gravar(cur, sku, custo, data_pedido):
+    """Grava o custo em todos os anúncios do SKU. Devolve quantos."""
+    cur.execute(
+        "SELECT ml_item_id, conta_ml, titulo FROM ml_anuncios WHERE upper(sku) = %s",
+        (sku,),
+    )
+    anuncios = cur.fetchall()
+    for a in anuncios:
+        cur.execute(
+            """INSERT INTO custos_produtos
+                 (conta_ml, item_id, titulo, custo_unitario, sku_interno, atualizado_em, custo_atualizado_em)
+               VALUES (%s, %s, %s, %s, %s, now(), now())
+               ON CONFLICT (conta_ml, item_id) DO UPDATE
+               SET custo_unitario = EXCLUDED.custo_unitario,
+                   sku_interno = COALESCE(custos_produtos.sku_interno, EXCLUDED.sku_interno),
+                   atualizado_em = now(),
+                   custo_atualizado_em = now()""",
+            (a["conta_ml"], a["ml_item_id"], a["titulo"], custo, sku),
+        )
+        # A Curva ABC escolhe o custo por (item_id, vigente_desde): duas
+        # linhas na mesma data deixam a escolha ao acaso. Por isso altera a
+        # linha da data, se já houver, em vez de inserir outra. E nunca
+        # nasce antes do último registro, senão ficaria escondida por ele.
+        cur.execute(
+            """SELECT GREATEST(%s::date, COALESCE(max(vigente_desde), %s::date)) AS vigente
+                 FROM custos_historico WHERE item_id = %s AND conta_ml = %s""",
+            (data_pedido, data_pedido, a["ml_item_id"], a["conta_ml"]),
+        )
+        vigente = cur.fetchone()["vigente"]
+        cur.execute(
+            """UPDATE custos_historico SET custo_unitario = %s
+                WHERE item_id = %s AND conta_ml = %s AND vigente_desde = %s
+                RETURNING id""",
+            (custo, a["ml_item_id"], a["conta_ml"], vigente),
+        )
+        if not cur.fetchone():
+            cur.execute(
+                """INSERT INTO custos_historico (item_id, conta_ml, custo_unitario, vigente_desde)
+                   VALUES (%s, %s, %s, %s)""",
+                (a["ml_item_id"], a["conta_ml"], custo, vigente),
+            )
+    return [a["titulo"] for a in anuncios]
+
+
 def aplicar(item_id, sku, valor_unitario, data_pedido):
-    """Grava o custo do item em todos os anúncios do SKU. Devolve o que fez,
-    para a tela poder contar: {sku, status, custo?, anuncios?}."""
-    custo = custo_com_nf(valor_unitario)
+    """Grava o custo do item em todos os anúncios do SKU e nos kits feitos
+    dele. Devolve o que fez, para a tela poder contar."""
+    # Sem arredondar a unidade: 10 × 0,306 = 3,06, e não 10 × 0,31.
+    unidade = float(valor_unitario) * (1 + NF)
     with db.transaction() as cur:
         cur.execute(
             """SELECT 1 FROM fin_pedido_itens i
@@ -61,46 +107,32 @@ def aplicar(item_id, sku, valor_unitario, data_pedido):
         if cur.fetchone():
             return {"sku": sku, "status": "pedido_mais_novo"}
 
-        cur.execute(
-            "SELECT ml_item_id, conta_ml, titulo FROM ml_anuncios WHERE upper(sku) = %s",
-            (sku,),
-        )
-        anuncios = cur.fetchall()
-        if not anuncios:
+        # O valor do pedido é por UNIDADE. Se o SKU é um kit (Kit 10 emendas),
+        # o anúncio leva N unidades — e só vale o N que ela confirmou.
+        cur.execute("SELECT unidades FROM sku_kits WHERE sku = %s", (sku,))
+        kit = cur.fetchone()
+        unidades = float(kit["unidades"]) if kit else 1
+
+        titulos = _gravar(cur, sku, round(unidade * unidades, 2), data_pedido) if (kit or not _parece_kit(cur, sku)) else None
+        if titulos is None:
+            return {"sku": sku, "status": "kit_nao_confirmado"}
+        if not titulos:
             return {"sku": sku, "status": "sku_desconhecido"}
 
-        for a in anuncios:
-            cur.execute(
-                """INSERT INTO custos_produtos
-                     (conta_ml, item_id, titulo, custo_unitario, sku_interno, atualizado_em, custo_atualizado_em)
-                   VALUES (%s, %s, %s, %s, %s, now(), now())
-                   ON CONFLICT (conta_ml, item_id) DO UPDATE
-                   SET custo_unitario = EXCLUDED.custo_unitario,
-                       sku_interno = COALESCE(custos_produtos.sku_interno, EXCLUDED.sku_interno),
-                       atualizado_em = now(),
-                       custo_atualizado_em = now()""",
-                (a["conta_ml"], a["ml_item_id"], a["titulo"], custo, sku),
-            )
-            # A Curva ABC escolhe o custo por (item_id, vigente_desde): duas
-            # linhas na mesma data deixam a escolha ao acaso. Por isso altera a
-            # linha da data, se já houver, em vez de inserir outra. E nunca
-            # nasce antes do último registro, senão ficaria escondida por ele.
-            cur.execute(
-                """SELECT GREATEST(%s::date, COALESCE(max(vigente_desde), %s::date)) AS vigente
-                     FROM custos_historico WHERE item_id = %s AND conta_ml = %s""",
-                (data_pedido, data_pedido, a["ml_item_id"], a["conta_ml"]),
-            )
-            vigente = cur.fetchone()["vigente"]
-            cur.execute(
-                """UPDATE custos_historico SET custo_unitario = %s
-                    WHERE item_id = %s AND conta_ml = %s AND vigente_desde = %s
-                    RETURNING id""",
-                (custo, a["ml_item_id"], a["conta_ml"], vigente),
-            )
-            if not cur.fetchone():
-                cur.execute(
-                    """INSERT INTO custos_historico (item_id, conta_ml, custo_unitario, vigente_desde)
-                       VALUES (%s, %s, %s, %s)""",
-                    (a["ml_item_id"], a["conta_ml"], custo, vigente),
-                )
-    return {"sku": sku, "status": "atualizado", "custo": custo, "anuncios": len(anuncios)}
+        cur.execute("SELECT sku, unidades FROM sku_kits WHERE sku_base = %s ORDER BY sku", (sku,))
+        filhos = cur.fetchall()
+        kits_feitos = []
+        for f in filhos:
+            custo_kit = round(unidade * float(f["unidades"]), 2)
+            n = len(_gravar(cur, f["sku"], custo_kit, data_pedido))
+            if n:
+                kits_feitos.append({"sku": f["sku"], "custo": custo_kit, "anuncios": n})
+    return {"sku": sku, "status": "atualizado", "custo": round(unidade * unidades, 2),
+            "anuncios": len(titulos), "kits": kits_feitos}
+
+
+def _parece_kit(cur, sku):
+    """Título diz "Kit N" e ela ainda não confirmou: não gravar o custo de uma
+    unidade num anúncio que vende várias."""
+    cur.execute("SELECT titulo FROM ml_anuncios WHERE upper(sku) = %s", (sku,))
+    return any(kits.unidades_no_titulo(r["titulo"]) for r in cur.fetchall())
