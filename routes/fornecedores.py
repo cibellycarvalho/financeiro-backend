@@ -9,6 +9,7 @@ from anexos import MSG_LEITURA_INDISPONIVEL, MSG_ANEXO_NAO_GUARDADO
 import db
 import aliases
 import custo_pedido
+import kits
 import leitura_documento
 import storage
 from auth import require_auth, require_admin
@@ -241,6 +242,63 @@ def _atualizar_custos(fornecedor_id, data_pedido, itens):
     return resultado
 
 
+def _skus_dos_itens(fornecedor_id, itens):
+    """Primeiro o SKU que ela já ligou a este produto deste fornecedor
+    (sku_origem "aprendido"); para o resto, a IA casa com o catálogo do CRM
+    ("sugerido" — a tela pede para conferir). Falhar aqui só deixa vazio."""
+    saida = [{**i, "sku": custo_pedido.sugerir_sku(fornecedor_id, i["produto"]), "sku_origem": None} for i in itens]
+    for i in saida:
+        if i["sku"]:
+            i["sku_origem"] = "aprendido"
+    faltam = [k for k, i in enumerate(saida) if not i["sku"]]
+    if not faltam:
+        return saida
+    try:
+        achados = leitura_documento.casar_skus([saida[k]["produto"] for k in faltam], kits.catalogo())
+    except Exception as e:
+        print(f"[casar_skus] falhou: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return saida
+    for pos, sku in achados.items():
+        saida[faltam[pos]].update(sku=sku, sku_origem="sugerido")
+    return saida
+
+
+@bp.get("/kits")
+@require_auth
+def listar_kits():
+    return jsonify(kits.listar())
+
+
+@bp.put("/kits/<sku>")
+@require_auth
+@require_admin
+def confirmar_kit(sku):
+    data = request.get_json() or {}
+    sku_n, erro = _normalizar_sku(sku)
+    if erro or not sku_n:
+        return jsonify({"error": erro or "sku obrigatório"}), 400
+    base, erro = _normalizar_sku(data.get("sku_base"))
+    if erro:
+        return jsonify({"error": erro}), 400
+    if base == sku_n:
+        return jsonify({"error": "o kit não pode ser feito dele mesmo"}), 400
+    try:
+        unidades = float(data.get("unidades"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "unidades deve ser número"}), 400
+    if unidades <= 0:
+        return jsonify({"error": "unidades deve ser maior que zero"}), 400
+    return jsonify(kits.confirmar(sku_n, unidades, base))
+
+
+@bp.delete("/kits/<sku>")
+@require_auth
+@require_admin
+def remover_kit(sku):
+    kits.remover(sku.upper())
+    return "", 204
+
+
 def _data_do_pedido(pedido_id):
     return lambda: db.query("SELECT data_pedido FROM fin_pedidos_fornecedor WHERE id = %s", (pedido_id,))[0]["data_pedido"]
 
@@ -299,8 +357,7 @@ def ler_pedido_arquivo(fornecedor_id):
         "texto_vendedor": lido["texto_vendedor"],
         "numero_pedido": lido["numero_pedido"],
         "data_pedido": lido["data_pedido"],
-        # O SKU que ela já ligou a este produto deste fornecedor em pedido anterior.
-        "itens": [{**i, "sku": custo_pedido.sugerir_sku(fornecedor_id, i["produto"])} for i in lido["itens"]],
+        "itens": _skus_dos_itens(fornecedor_id, lido["itens"]),
         "total_documento": lido["total_documento"],
         "pedido_existente": existente,
     })
