@@ -23,7 +23,7 @@ def criar():
 
     if not email:
         return jsonify({"error": "email obrigatório"}), 400
-    if role not in ("fin_admin", "fin_viewer"):
+    if role not in ("fin_admin", "fin_viewer", "fin_compras"):
         return jsonify({"error": "role inválido"}), 400
 
     resp = http.get(

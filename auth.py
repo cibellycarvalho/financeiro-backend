@@ -57,15 +57,41 @@ def require_auth(f):
             return jsonify({"error": "Token inválido"}), 401
         if g.user["fin_role"] is None:
             return jsonify({"error": "Acesso não autorizado ao painel financeiro"}), 403
+        if g.user["fin_role"] == "fin_compras" and request.endpoint not in ENDPOINTS_COMPRAS:
+            return jsonify({"error": "Seu acesso é só de compras"}), 403
         return f(*args, **kwargs)
     return decorated
+
+
+# Papel de quem negocia com fornecedor: cadastra fornecedor e sobe/edita pedido.
+# Não vê pagamentos, devoluções, caixa, funcionários nem fechamento.
+ENDPOINTS_COMPRAS = {
+    "fornecedores.listar",
+    "fornecedores.criar_fornecedor",
+    "fornecedores.editar_fornecedor",
+    "fornecedores.listar_skus",
+    "fornecedores.listar_kits",
+    "fornecedores.listar_pedidos",
+    "fornecedores.ler_pedido_arquivo",
+    "fornecedores.criar_pedido",
+    "fornecedores.atualizar_pedido",
+    "fornecedores.adicionar_item",
+    "fornecedores.editar_item",
+    "fornecedores.excluir_item",
+    "fornecedores.aplicar_desconto",
+    "fornecedores.desfazer_desconto",
+    "fornecedores.anexo_pedido",
+    "fornecedores.subir_nf_pedido",
+    "fornecedores.anexo_nf_pedido",
+}
 
 
 def require_admin(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         user = getattr(g, "user", {})
-        if user.get("fin_role") != "fin_admin":
+        # fin_compras só chega aqui em rota de ENDPOINTS_COMPRAS (filtrado no require_auth)
+        if user.get("fin_role") not in ("fin_admin", "fin_compras"):
             return jsonify({"error": "Apenas administradores podem executar esta ação"}), 403
         return f(*args, **kwargs)
     return decorated
