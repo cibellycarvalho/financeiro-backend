@@ -370,3 +370,63 @@ def casar_skus(produtos, catalogo):
         if medidas_batem(produtos[i], catalogo[sku]):
             achados[i] = sku
     return achados
+
+
+ESQUEMA_EXTRATO = {
+    "type": "object",
+    "properties": {
+        "movimentos": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "data": {"type": "string", "description": "AAAA-MM-DD"},
+                    "descricao": {"type": "string"},
+                    "valor": {"type": "number", "description": "negativo = saída, positivo = entrada"},
+                },
+                "required": ["data", "descricao", "valor"],
+                "additionalProperties": False,
+            },
+        },
+        "saldo_final": {"type": ["number", "null"]},
+    },
+    "required": ["movimentos", "saldo_final"],
+    "additionalProperties": False,
+}
+
+INSTRUCAO_EXTRATO = (
+    "Este é um extrato bancário. Transcreva cada lançamento, na ordem do extrato: "
+    "a data (AAAA-MM-DD), a descrição como está escrita e o valor em reais, "
+    "NEGATIVO quando sai dinheiro (débito, Pix enviado, boleto, tarifa) e "
+    "POSITIVO quando entra (crédito, Pix recebido, TED recebida). Números no "
+    "padrão brasileiro (1.000,50 = mil reais e cinquenta centavos). NÃO inclua "
+    "linhas de saldo (saldo anterior, saldo do dia, saldo final) como lançamento. "
+    "Em saldo_final, o saldo da conta no fim do extrato, ou null se não houver."
+)
+
+
+def ler_extrato(dados, mime):
+    """Extrato em PDF ou imagem → mesmo formato de conciliacao.ler_ofx.
+
+    PDF não tem FITID: o identificador é data|valor|descrição mais a ordem entre
+    lançamentos iguais, para o mesmo extrato enviado de novo não duplicar.
+    """
+    bruto = _chamar(dados, mime, INSTRUCAO_EXTRATO, ESQUEMA_EXTRATO)
+    vistos, movimentos = {}, []
+    for m in bruto.get("movimentos") or []:
+        d = _data_ou_none(m.get("data"))
+        try:
+            valor = round(float(m.get("valor")), 2)
+        except (TypeError, ValueError):
+            continue
+        if not d or not valor:
+            continue
+        descricao = (m.get("descricao") or "").strip() or None
+        chave = f"pdf|{d}|{valor:.2f}|{(descricao or '').upper()}"
+        vistos[chave] = vistos.get(chave, 0) + 1
+        movimentos.append({"fitid": f"{chave}|{vistos[chave]}", "data": date.fromisoformat(d),
+                           "valor": valor, "descricao": descricao})
+    if not movimentos:
+        raise LeituraFalhou("nenhum lançamento legível no extrato")
+    saldo = bruto.get("saldo_final")
+    return {"movimentos": movimentos, "saldo": round(float(saldo), 2) if isinstance(saldo, (int, float)) else None}
