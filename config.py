@@ -11,6 +11,12 @@ ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS",
     "http://localhost:5174,https://financeiro.sellerml.com.br"
 ).split(",")
+# O CRM abre as telas de Dinheiro com o mesmo login (27/10/2026) e chama esta
+# API direto do navegador. Entra sempre, mesmo que a variável do EasyPanel não
+# traga: esquecer de configurar quebraria as telas em silêncio.
+for _o in ("https://crm.cravelli.com.br", "https://financeiro.cravelli.com.br"):
+    if _o not in ALLOWED_ORIGINS:
+        ALLOWED_ORIGINS.append(_o)
 
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
 
