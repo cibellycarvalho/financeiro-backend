@@ -22,6 +22,7 @@ def create_app():
     from routes.planejamento import bp as planejamento_bp
     from routes.funcionarios import bp as funcionarios_bp
     from routes.pacote import bp as pacote_bp
+    from routes.bancos import bp as bancos_bp
 
     app.register_blueprint(contas_bp, url_prefix="/api/contas")
     app.register_blueprint(repasses_bp, url_prefix="/api/repasses")
@@ -33,6 +34,7 @@ def create_app():
     app.register_blueprint(planejamento_bp, url_prefix="/api/planejamento")
     app.register_blueprint(funcionarios_bp, url_prefix="/api/funcionarios")
     app.register_blueprint(pacote_bp, url_prefix="/api/pacote")
+    app.register_blueprint(bancos_bp, url_prefix="/api/bancos")
 
     @app.get("/health")
     def health():
