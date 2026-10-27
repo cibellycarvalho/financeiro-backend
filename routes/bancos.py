@@ -10,6 +10,7 @@ from flask import Blueprint, request, jsonify
 
 import db
 import conciliacao
+import leitura_documento
 from auth import require_auth
 
 bp = Blueprint("bancos", __name__)
@@ -111,14 +112,24 @@ def _candidatos(de, ate):
 def importar_extrato(conta_id):
     arq = request.files.get("arquivo")
     if not arq:
-        return jsonify({"error": "envie o arquivo OFX no campo 'arquivo'"}), 400
+        return jsonify({"error": "envie o extrato (OFX ou PDF) no campo 'arquivo'"}), 400
     bruto = arq.read(_MAX_OFX + 1)
     if len(bruto) > _MAX_OFX:
         return jsonify({"error": "arquivo maior que 5 MB"}), 400
-    try:
-        lido = conciliacao.ler_ofx(bruto)
-    except (ValueError, TypeError) as e:
-        return jsonify({"error": f"não consegui ler o extrato: {e}"}), 400
+    # PDF (27/10/2026): nem todo banco dá OFX fácil; o PDF é lido pela IA,
+    # como os comprovantes. O resto do caminho é o mesmo.
+    if bruto[:5] == b"%PDF-":
+        try:
+            lido = leitura_documento.ler_extrato(bruto, "application/pdf")
+        except leitura_documento.LeituraIndisponivel:
+            return jsonify({"error": "a leitura de PDF está fora do ar agora. Tente de novo ou envie em OFX."}), 503
+        except leitura_documento.LeituraFalhou as e:
+            return jsonify({"error": f"não consegui ler o PDF: {e}. Tente o OFX."}), 422
+    else:
+        try:
+            lido = conciliacao.ler_ofx(bruto)
+        except (ValueError, TypeError) as e:
+            return jsonify({"error": f"não consegui ler o extrato: {e}. Envie em OFX ou PDF."}), 400
     if not db.query("SELECT id FROM fin_contas_bancarias WHERE id = %s", (conta_id,)):
         return jsonify({"error": "conta não encontrada"}), 404
     movs = lido["movimentos"]

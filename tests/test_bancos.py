@@ -90,3 +90,27 @@ def test_confirmar_conta_marca_paga(client, admin_headers):
 def test_acao_invalida_400(client, admin_headers):
     r = client.put("/api/bancos/c1/extrato/m1", headers=admin_headers, json={"acao": "apagar"})
     assert r.status_code == 400
+
+
+def test_importar_extrato_pdf_usa_a_leitura(client, admin_headers):
+    import io
+    from datetime import date
+    lido = {"movimentos": [{"fitid": "pdf|1", "data": date(2026, 10, 27), "valor": -59.9, "descricao": "TARIFA"}], "saldo": 100.0}
+    cur, tx = _transacao({"id": "m1"})
+    with patch("routes.bancos.leitura_documento.ler_extrato", return_value=lido) as ler, \
+         patch("routes.bancos.db.query", side_effect=[[{"id": "c1"}], [], [], []]), \
+         patch("routes.bancos.db.transaction", tx):
+        r = client.post("/api/bancos/c1/extrato", headers=admin_headers,
+                        data={"arquivo": (io.BytesIO(b"%PDF-1.7 ..."), "extrato.pdf")},
+                        content_type="multipart/form-data")
+    assert r.status_code == 201 and r.get_json()["novos"] == 1
+    assert ler.call_args[0][1] == "application/pdf"
+
+
+def test_pdf_ilegivel_422(client, admin_headers):
+    import io
+    import leitura_documento
+    with patch("routes.bancos.leitura_documento.ler_extrato", side_effect=leitura_documento.LeituraFalhou("x")):
+        r = client.post("/api/bancos/c1/extrato", headers=admin_headers,
+                        data={"arquivo": (io.BytesIO(b"%PDF-1.7"), "e.pdf")}, content_type="multipart/form-data")
+    assert r.status_code == 422

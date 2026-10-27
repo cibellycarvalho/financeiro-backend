@@ -57,3 +57,18 @@ def test_dois_iguais_no_mesmo_dia_so_sugere():
 def test_sem_candidato_e_novo():
     c = [{"tipo": "conta", "id": "c", "valor": 50, "data": date(2026, 10, 1), "pago": True, "texto": "x"}]
     assert conciliacao.sugerir({"valor": -50.0, "data": D}, c)["status"] == "novo"
+
+
+def test_extrato_pdf_iguais_no_mesmo_dia_tem_ids_diferentes():
+    from unittest.mock import patch
+    import leitura_documento
+    bruto = {"movimentos": [
+        {"data": "2026-10-27", "descricao": "PIX ENVIADO", "valor": -50},
+        {"data": "2026-10-27", "descricao": "PIX ENVIADO", "valor": -50},
+        {"data": "lixo", "descricao": "x", "valor": 1},
+    ], "saldo_final": 9870.5}
+    with patch("leitura_documento._chamar", return_value=bruto):
+        r = leitura_documento.ler_extrato(b"%PDF", "application/pdf")
+    ids = [m["fitid"] for m in r["movimentos"]]
+    assert len(ids) == 2 and ids[0] != ids[1]
+    assert r["saldo"] == 9870.5 and r["movimentos"][0]["valor"] == -50.0
