@@ -55,3 +55,38 @@ def test_conta_inexistente_404(client, admin_headers):
     with patch("routes.bancos.db.transaction", tx):
         r = client.put("/api/bancos/zz", headers=admin_headers, json={"nome": "X"})
     assert r.status_code == 404
+
+
+def test_importar_extrato_grava_e_atualiza_saldo(client, admin_headers):
+    import io
+    from tests.test_conciliacao import OFX_SGML
+    cur, tx = _transacao({"id": "m1"})
+    with patch("routes.bancos.db.query", side_effect=[[{"id": "c1"}], [], [], []]), \
+         patch("routes.bancos.db.transaction", tx):
+        r = client.post("/api/bancos/c1/extrato", headers=admin_headers,
+                        data={"arquivo": (io.BytesIO(OFX_SGML), "extrato.ofx")},
+                        content_type="multipart/form-data")
+    assert r.status_code == 201, r.get_json()
+    assert r.get_json() == {"lidos": 2, "novos": 2, "saldo": 9870.5}
+    sqls = [c[0][0] for c in cur.execute.call_args_list]
+    assert sum("INSERT INTO fin_extrato_movimentos" in s for s in sqls) == 2
+    assert "ON CONFLICT" in sqls[0]
+    assert "SET saldo" in sqls[-1]
+
+
+def test_confirmar_conta_marca_paga(client, admin_headers):
+    cur, tx = _transacao()
+    cur.fetchone.side_effect = [
+        {"id": "m1", "data": "2026-10-27", "casado_tipo": "conta", "casado_id": "c9", "casado_texto": "Conta: DAS"},
+        {"id": "m1", "status": "casado"},
+    ]
+    with patch("routes.bancos.db.transaction", tx):
+        r = client.put("/api/bancos/c1/extrato/m1", headers=admin_headers, json={"acao": "confirmar"})
+    assert r.status_code == 200
+    sqls = [c[0][0] for c in cur.execute.call_args_list]
+    assert any("UPDATE fin_contas_pagar SET status = 'pago'" in s for s in sqls)
+
+
+def test_acao_invalida_400(client, admin_headers):
+    r = client.put("/api/bancos/c1/extrato/m1", headers=admin_headers, json={"acao": "apagar"})
+    assert r.status_code == 400
