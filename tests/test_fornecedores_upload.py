@@ -329,7 +329,7 @@ def test_registrar_pagamento_grava_e2e_move_anexo_e_aprende_alias(client, admin_
     _saldo(mocker, 100000.0)
     query = mocker.patch("routes.fornecedores.db.query")
     # 1ª: fornecedor existe; 2ª: nenhum pagamento com esse E2E
-    query.side_effect = [[{"id": FORN}], []]
+    query.side_effect = [[{"id": FORN}], [], []]
     execute = mocker.patch("routes.fornecedores.db.execute")
     execute.side_effect = [dict(PAGAMENTO_NOVO), {**PAGAMENTO_NOVO, "arquivo_path": f"{FORN}/pagamentos/pg-9.pdf"}]
     mover = mocker.patch("routes.fornecedores.storage.mover")
@@ -353,7 +353,7 @@ def test_registrar_pagamento_grava_e2e_move_anexo_e_aprende_alias(client, admin_
 def test_registrar_pagamento_e2e_repetido_409(client, admin_headers, mocker):
     _saldo(mocker, 100000.0)
     query = mocker.patch("routes.fornecedores.db.query")
-    query.side_effect = [[{"id": FORN}], [{"id": "pg-1", "data_pagamento": "2026-08-24", "valor": 30000.0}]]
+    query.side_effect = [[{"id": FORN}], [], [{"id": "pg-1", "data_pagamento": "2026-08-24", "valor": 30000.0}]]
     execute = mocker.patch("routes.fornecedores.db.execute")
     r = client.post(f"/api/fornecedores/{FORN}/pagamentos", json={
         "valor": 30000, "data_pagamento": "2026-08-24",
@@ -377,7 +377,7 @@ def test_registrar_pagamento_sem_campos_novos_continua_igual(client, admin_heade
 
 def test_registrar_pagamento_anexo_falhou_ainda_aprende_alias(client, admin_headers, mocker):
     _saldo(mocker, 100000.0)
-    mocker.patch("routes.fornecedores.db.query", side_effect=[[{"id": FORN}], []])
+    mocker.patch("routes.fornecedores.db.query", side_effect=[[{"id": FORN}], [], []])
     mocker.patch("routes.fornecedores.db.execute", return_value=dict(PAGAMENTO_NOVO))
     mocker.patch("routes.fornecedores.storage.mover", side_effect=storage.StorageErro("x"))
     aprender = mocker.patch("routes.fornecedores.aliases.aprender_alias")

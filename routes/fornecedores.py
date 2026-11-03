@@ -1012,9 +1012,22 @@ def registrar_pagamento(fornecedor_id):
     if not fornecedores:
         return jsonify({"error": "Fornecedor não encontrado"}), 404
 
-    saldo_aberto = _saldo_aberto_fornecedor(fornecedor_id)
-    if valor > saldo_aberto:
-        return jsonify({"error": f"Valor maior que o saldo em aberto (R$ {saldo_aberto:.2f})"}), 400
+    # O Pix pode já ter entrado sozinho pelo extrato do banco (planilha do BTG,
+    # 03/11/2026): mesmo fornecedor, mesmo valor, até 1 dia de diferença, sem
+    # quem lançou e com o identificador numérico do banco. Aí o comprovante
+    # completa ESSE pagamento em vez de lançar outro.
+    do_extrato = db.query(
+        """SELECT id FROM fin_pagamentos_fornecedor
+            WHERE fornecedor_id = %s AND criado_por IS NULL AND id_transacao ~ '^[0-9]+$'
+              AND abs(valor - %s) < 0.005
+              AND data_pagamento BETWEEN %s::date - 1 AND %s::date + 1
+            ORDER BY created_at LIMIT 1""",
+        (fornecedor_id, valor, data["data_pagamento"], data["data_pagamento"]))
+
+    if not do_extrato:
+        saldo_aberto = _saldo_aberto_fornecedor(fornecedor_id)
+        if valor > saldo_aberto:
+            return jsonify({"error": f"Valor maior que o saldo em aberto (R$ {saldo_aberto:.2f})"}), 400
 
     id_transacao = (data.get("id_transacao") or "").strip() or None
     arquivo_token = (data.get("arquivo_token") or "").strip() or None
@@ -1042,12 +1055,21 @@ def registrar_pagamento(fornecedor_id):
             return jsonify({"error": f"Esse comprovante já foi lançado em {quando} "
                                      f"(R$ {float(repetidos[0]['valor']):.2f})"}), 409
 
-    row = db.execute(
-        """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, id_transacao, pedido_id, criado_por)
-           VALUES (%s, %s, %s, %s, %s, %s)
-           RETURNING *""",
-        (fornecedor_id, valor, data["data_pagamento"], id_transacao, pedido_id, g.user["user_id"])
-    )
+    if do_extrato:
+        row = db.execute(
+            """UPDATE fin_pagamentos_fornecedor
+                  SET id_transacao = COALESCE(%s, id_transacao), pedido_id = COALESCE(%s, pedido_id),
+                      data_pagamento = %s, criado_por = %s
+                WHERE id = %s RETURNING *""",
+            (id_transacao, pedido_id, data["data_pagamento"], g.user["user_id"], do_extrato[0]["id"])
+        )
+    else:
+        row = db.execute(
+            """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, id_transacao, pedido_id, criado_por)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               RETURNING *""",
+            (fornecedor_id, valor, data["data_pagamento"], id_transacao, pedido_id, g.user["user_id"])
+        )
     # Pedido subido já pago: a caixinha nasce marcada.
     if pedido_id:
         db.execute("UPDATE fin_pedidos_fornecedor SET pago_em = %s WHERE id = %s",
