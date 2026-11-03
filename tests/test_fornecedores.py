@@ -444,7 +444,7 @@ def test_registrar_pagamento_fornecedor(client, admin_headers):
     saldo_row = [{"saldo_aberto": 5600.00}]
     pagamento_criado = {"id": "pg1", "fornecedor_id": FORNECEDOR_FIXTURE["id"],
                          "valor": 2000.00, "data_pagamento": "2026-08-05"}
-    with patch("routes.fornecedores.db.query", side_effect=[fornecedor_ativo, saldo_row]), \
+    with patch("routes.fornecedores.db.query", side_effect=[fornecedor_ativo, [], saldo_row]), \
          patch("routes.fornecedores.db.execute", return_value=pagamento_criado) as mock_execute:
         resp = client.post(
             f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos",
@@ -465,7 +465,7 @@ def test_registrar_pagamento_liga_no_maximo_o_valor_da_compra(client, admin_head
     pedido_amarrado = [{"id": PEDIDO_FIXTURE["id"], "valor_total": 500.00, "pago_em": None}]
     pagamento_criado = {"id": "pg1", "fornecedor_id": FORNECEDOR_FIXTURE["id"],
                          "valor": 800.00, "data_pagamento": "2026-08-05"}
-    with patch("routes.fornecedores.db.query", side_effect=[fornecedor_ativo, saldo_row, pedido_amarrado]), \
+    with patch("routes.fornecedores.db.query", side_effect=[fornecedor_ativo, [], saldo_row, pedido_amarrado]), \
          patch("routes.fornecedores.db.execute", return_value=pagamento_criado) as mock_execute:
         resp = client.post(
             f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos",
@@ -482,7 +482,7 @@ def test_registrar_pagamento_liga_no_maximo_o_valor_da_compra(client, admin_head
 def test_registrar_pagamento_fornecedor_maior_que_saldo_retorna_erro(client, admin_headers):
     fornecedor_ativo = [{"id": FORNECEDOR_FIXTURE["id"]}]
     saldo_row = [{"saldo_aberto": 100.00}]
-    with patch("routes.fornecedores.db.query", side_effect=[fornecedor_ativo, saldo_row]):
+    with patch("routes.fornecedores.db.query", side_effect=[fornecedor_ativo, [], saldo_row]):
         resp = client.post(
             f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos",
             json={"valor": 200.00, "data_pagamento": "2026-08-05"},
@@ -692,3 +692,24 @@ def test_desmarcar_ja_lancado_nao_apaga_amarracao_de_pagamento_que_continua(clie
 def test_caixinha_viewer_nao_pode_marcar_viewer(client, viewer_headers):
     resp = client.post(URL_PAGO, json={"modo": "lancar", "data_pagamento": "2026-09-17"}, headers=viewer_headers)
     assert resp.status_code == 403
+
+
+def test_comprovante_de_pix_que_ja_entrou_pelo_extrato_completa_o_pagamento(client, admin_headers):
+    """Pix lançado sozinho pela planilha do BTG: subir o comprovante depois não
+    lança de novo (nem barra pelo saldo, que já foi abatido) — completa o mesmo."""
+    fornecedor_ativo = [{"id": FORNECEDOR_FIXTURE["id"]}]
+    do_extrato = [{"id": "pg-extrato"}]
+    atualizado = {"id": "pg-extrato", "fornecedor_id": FORNECEDOR_FIXTURE["id"],
+                  "valor": 2000.00, "data_pagamento": "2026-08-05"}
+    with patch("routes.fornecedores.db.query", side_effect=[fornecedor_ativo, do_extrato]), \
+         patch("routes.fornecedores.db.execute", return_value=atualizado) as mock_execute:
+        resp = client.post(
+            f"/api/fornecedores/{FORNECEDOR_FIXTURE['id']}/pagamentos",
+            json={"valor": 2000.00, "data_pagamento": "2026-08-05"},
+            headers=admin_headers
+        )
+    assert resp.status_code == 201
+    assert resp.get_json()["id"] == "pg-extrato"
+    sqls = [c[0][0] for c in mock_execute.call_args_list]
+    assert not any("INSERT INTO fin_pagamentos_fornecedor" in s for s in sqls)
+    assert "UPDATE fin_pagamentos_fornecedor" in sqls[0]
