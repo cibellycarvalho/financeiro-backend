@@ -51,6 +51,40 @@ def test_ler_pedido_data_invalida_vira_none(mocker):
     assert ld.ler_pedido(b"%PDF", "application/pdf")["data_pedido"] is None
 
 
+def _pedido_mxt(total):
+    return {"texto_vendedor": "MXT CENTER", "numero_pedido": "0333692", "data_pedido": "2026-11-06",
+            "itens": [{"produto": "CABO P10 MACHO MONO + XLR FEMEA", "quantidade": 480, "valor_unitario": 18.55}],
+            "total_documento": total}
+
+
+def test_ler_pedido_imposto_por_fora_vira_linha_de_acrescimo(mocker):
+    """MXT 333692: itens somam 8.904,00 e o total geral é 9.349,20 (só o IPI,
+    445,20, entra no total; CBS e IBS do PDF são informativos)."""
+    mocker.patch("leitura_documento._chamar", return_value=_pedido_mxt(9349.20))
+    lido = ld.ler_pedido(b"%PDF", "application/pdf")
+    assert len(lido["itens"]) == 2
+    extra = lido["itens"][1]
+    assert extra["quantidade"] == 1 and extra["valor_unitario"] == 445.20
+    soma = sum(i["quantidade"] * i["valor_unitario"] for i in lido["itens"])
+    assert round(soma, 2) == 9349.20
+
+
+def test_ler_pedido_total_igual_aos_itens_nao_cria_linha(mocker):
+    mocker.patch("leitura_documento._chamar", return_value=_pedido_mxt(8904.00))
+    assert len(ld.ler_pedido(b"%PDF", "application/pdf")["itens"]) == 1
+
+
+def test_ler_pedido_total_menor_que_itens_nao_cria_linha(mocker):
+    mocker.patch("leitura_documento._chamar", return_value=_pedido_mxt(8000.00))
+    assert len(ld.ler_pedido(b"%PDF", "application/pdf")["itens"]) == 1
+
+
+def test_ler_pedido_total_absurdo_nao_cria_linha(mocker):
+    """Mais de 50% acima dos itens: provável leitura errada, não imposto."""
+    mocker.patch("leitura_documento._chamar", return_value=_pedido_mxt(20000.00))
+    assert len(ld.ler_pedido(b"%PDF", "application/pdf")["itens"]) == 1
+
+
 # --- ler_comprovante --------------------------------------------------------
 
 def test_ler_comprovante_data_vem_do_e2e_nao_da_ia(mocker):
