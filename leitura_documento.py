@@ -66,7 +66,9 @@ INSTRUCAO_PEDIDO = (
     "Este é um pedido de compra de um fornecedor. Transcreva: o nome do vendedor "
     "ou fornecedor como está escrito, o número do pedido, a data do pedido "
     "(AAAA-MM-DD), cada item com produto, quantidade e valor unitário em reais, "
-    "e o total do documento. Números no padrão brasileiro (1.000,50 = mil reais e "
+    "e o total do documento. O total do documento é o TOTAL GERAL a pagar, com "
+    "impostos (IPI, CBS, IBS, ICMS-ST), frete e descontos já aplicados — não o "
+    "\"total de produtos\". Números no padrão brasileiro (1.000,50 = mil reais e "
     "cinquenta centavos). Não invente itens: se não estiver legível, deixe fora."
 )
 
@@ -245,6 +247,17 @@ def ler_pedido(dados, mime):
     if not itens:
         raise LeituraFalhou("nenhum item legível")
     total = bruto.get("total_documento")
+    # O total a pagar passa dos itens quando o pedido traz imposto por fora
+    # (IPI, CBS, IBS) ou frete — MXT 333692: itens R$ 8.904,00, total geral
+    # R$ 9.349,20. A diferença é calculada aqui, não pelo modelo, e entra como
+    # uma linha editável. Limite de 50% dos itens: acima disso é mais provável
+    # leitura errada do total do que imposto.
+    if isinstance(total, (int, float)) and not isinstance(total, bool):
+        soma = round(sum(i["quantidade"] * i["valor_unitario"] for i in itens), 2)
+        extra = round(float(total) - soma, 2)
+        if 0.05 < extra <= soma * 0.5:
+            itens.append({"produto": "Impostos e acréscimos (IPI, frete etc.)",
+                          "quantidade": 1.0, "valor_unitario": extra})
     return {
         "texto_vendedor": (bruto.get("texto_vendedor") or "").strip() or None,
         "numero_pedido": (bruto.get("numero_pedido") or "").strip() or None,
