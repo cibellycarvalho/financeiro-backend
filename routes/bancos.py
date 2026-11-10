@@ -6,8 +6,11 @@ também traz os movimentos para conciliar.
 """
 from datetime import timedelta
 
-from flask import Blueprint, request, jsonify
+import re
 
+from flask import Blueprint, request, jsonify, g
+
+import aliases
 import db
 import conciliacao
 import leitura_documento
@@ -173,7 +176,37 @@ def listar_extrato(conta_id):
     rows = db.query(
         f"SELECT * FROM fin_extrato_movimentos WHERE {' AND '.join(cond)} ORDER BY data DESC, created_at LIMIT 500",
         tuple(params))
+    _sugerir_fornecedores(rows)
     return jsonify(rows)
+
+
+_RE_BENEFICIARIO = re.compile(r"(?:enviado|enviada)\s+(?:para|a)\s+(.+)$", re.I)
+
+
+def _beneficiario(descricao):
+    """Nome de quem recebeu, como o banco escreve: "Pagamento de boleto enviado
+    para MXT CENTER COMERCIO D" -> "MXT CENTER COMERCIO D"."""
+    m = _RE_BENEFICIARIO.search((descricao or "").strip())
+    return m.group(1).strip() if m else None
+
+
+def _sugerir_fornecedores(rows):
+    """Saída ainda sem destino cujo beneficiário já é alias de um fornecedor
+    ganha `fornecedor_sugerido` — o painel oferece lançar como pagamento dele."""
+    achados = {}
+    for r in rows:
+        if r.get("status") != "novo" or float(r.get("valor") or 0) >= 0:
+            continue
+        nome = _beneficiario(r.get("descricao"))
+        if not nome:
+            continue
+        if nome not in achados:
+            achados[nome] = aliases.sugerir_fornecedor(nome, "destinatario")
+        fid = achados[nome]
+        if fid:
+            forn = db.query("SELECT id, COALESCE(apelido, nome) AS nome FROM fin_fornecedores WHERE id = %s", (fid,))
+            if forn:
+                r["fornecedor_sugerido"] = {"id": forn[0]["id"], "nome": forn[0]["nome"]}
 
 
 @bp.put("/<conta_id>/extrato/<mov_id>")
@@ -181,10 +214,13 @@ def listar_extrato(conta_id):
 def decidir_movimento(conta_id, mov_id):
     """acao: 'confirmar' (aceita a sugestão), 'ignorar' ou 'reabrir'.
     Confirmar uma conta a pagar ainda em aberto a dá como paga na data do extrato."""
-    acao = (request.get_json(silent=True) or {}).get("acao")
+    corpo = request.get_json(silent=True) or {}
+    acao = corpo.get("acao")
+    if acao == "lancar_fornecedor":
+        return _lancar_como_pagamento(conta_id, mov_id, corpo.get("fornecedor_id"))
     novo = {"confirmar": "casado", "ignorar": "ignorado", "reabrir": "novo"}.get(acao)
     if not novo:
-        return jsonify({"error": "acao deve ser confirmar, ignorar ou reabrir"}), 400
+        return jsonify({"error": "acao deve ser confirmar, ignorar, reabrir ou lancar_fornecedor"}), 400
     with db.transaction() as cur:
         cur.execute("SELECT * FROM fin_extrato_movimentos WHERE id = %s AND conta_bancaria_id = %s FOR UPDATE",
                     (mov_id, conta_id))
@@ -203,3 +239,44 @@ def decidir_movimento(conta_id, mov_id):
             cur.execute("UPDATE fin_extrato_movimentos SET status = %s WHERE id = %s RETURNING *", (novo, mov_id))
         row = cur.fetchone()
     return jsonify(dict(row))
+
+
+def _lancar_como_pagamento(conta_id, mov_id, fornecedor_id):
+    """Saída do extrato que ninguém lançou (boleto pago, por exemplo) vira
+    pagamento do fornecedor: o dinheiro já saiu do banco, então o "Ainda devo"
+    cai na hora, como acontece com o Pix. Aceita passar do saldo em aberto —
+    o banco é a prova de que o dinheiro saiu."""
+    if not fornecedor_id:
+        return jsonify({"error": "escolha o fornecedor"}), 400
+    if not db.query("SELECT id FROM fin_fornecedores WHERE id = %s AND ativo = true", (fornecedor_id,)):
+        return jsonify({"error": "fornecedor não encontrado"}), 404
+    with db.transaction() as cur:
+        cur.execute("SELECT * FROM fin_extrato_movimentos WHERE id = %s AND conta_bancaria_id = %s FOR UPDATE",
+                    (mov_id, conta_id))
+        mov = cur.fetchone()
+        if not mov:
+            return jsonify({"error": "movimento não encontrado"}), 404
+        if float(mov["valor"]) >= 0:
+            return jsonify({"error": "só uma saída do banco pode virar pagamento"}), 400
+        if mov["status"] == "casado":
+            return jsonify({"error": "esse movimento já está casado com outro lançamento"}), 409
+        cur.execute(
+            """INSERT INTO fin_pagamentos_fornecedor (fornecedor_id, valor, data_pagamento, criado_por)
+               VALUES (%s, %s, %s, %s) RETURNING id""",
+            (fornecedor_id, round(-float(mov["valor"]), 2), mov["data"], g.user["user_id"]))
+        pagamento_id = cur.fetchone()["id"]
+        cur.execute("SELECT COALESCE(apelido, nome) AS nome FROM fin_fornecedores WHERE id = %s", (fornecedor_id,))
+        nome = cur.fetchone()["nome"]
+        cur.execute(
+            """UPDATE fin_extrato_movimentos
+                  SET status = 'casado', casado_tipo = 'fornecedor', casado_id = %s, casado_texto = %s
+                WHERE id = %s RETURNING *""",
+            (pagamento_id, f"Pagamento a {nome}", mov_id))
+        row = cur.fetchone()
+    # Na próxima vez o mesmo beneficiário já vem com o fornecedor sugerido. O
+    # registro está gravado: aprender o alias nunca vale um erro.
+    try:
+        aliases.aprender_alias(fornecedor_id, _beneficiario(mov["descricao"]), "destinatario")
+    except Exception as e:
+        print(f"[bancos] alias não aprendido: {type(e).__name__}: {e}", flush=True)
+    return jsonify(dict(row)), 201

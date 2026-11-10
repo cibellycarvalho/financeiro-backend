@@ -114,3 +114,60 @@ def test_pdf_ilegivel_422(client, admin_headers):
         r = client.post("/api/bancos/c1/extrato", headers=admin_headers,
                         data={"arquivo": (io.BytesIO(b"%PDF-1.7"), "e.pdf")}, content_type="multipart/form-data")
     assert r.status_code == 422
+
+
+MOV_BOLETO = {"id": "m9", "conta_bancaria_id": "c1", "data": "2026-12-06", "valor": -1033.12,
+              "descricao": "Pagamento de boleto enviado para MXT CENTER COMERCIO D", "status": "novo"}
+
+
+def test_beneficiario_do_boleto():
+    from routes.bancos import _beneficiario
+    assert _beneficiario("Pagamento de boleto enviado para MXT CENTER COMERCIO D") == "MXT CENTER COMERCIO D"
+    assert _beneficiario("Pix enviado para Elg Gestao E Cobranca Ltda") == "Elg Gestao E Cobranca Ltda"
+    assert _beneficiario("Tarifa mensal") is None
+
+
+def test_lancar_boleto_do_extrato_vira_pagamento_do_fornecedor(client, admin_headers):
+    cur = MagicMock()
+    cur.fetchone.side_effect = [MOV_BOLETO, {"id": "pg1"}, {"nome": "MXT"}, {**MOV_BOLETO, "status": "casado"}]
+
+    @contextmanager
+    def tx():
+        yield cur
+    with patch("routes.bancos.db.query", return_value=[{"id": "f1"}]), \
+         patch("routes.bancos.db.transaction", tx), \
+         patch("routes.bancos.aliases.aprender_alias") as alias:
+        r = client.put("/api/bancos/c1/extrato/m9", headers=admin_headers,
+                       json={"acao": "lancar_fornecedor", "fornecedor_id": "f1"})
+    assert r.status_code == 201
+    sqls = [c[0][0] for c in cur.execute.call_args_list]
+    assert any("INSERT INTO fin_pagamentos_fornecedor" in q for q in sqls)
+    inserido = next(c for c in cur.execute.call_args_list if "INSERT INTO fin_pagamentos_fornecedor" in c[0][0])
+    assert inserido[0][1][1] == 1033.12  # valor positivo, o dinheiro que saiu
+    alias.assert_called_once_with("f1", "MXT CENTER COMERCIO D", "destinatario")
+
+
+def test_lancar_sem_fornecedor_400(client, admin_headers):
+    r = client.put("/api/bancos/c1/extrato/m9", headers=admin_headers, json={"acao": "lancar_fornecedor"})
+    assert r.status_code == 400
+
+
+def test_lancar_entrada_ou_movimento_casado_recusa(client, admin_headers):
+    for mov, codigo in ((({**MOV_BOLETO, "valor": 500.0}), 400), (({**MOV_BOLETO, "status": "casado"}), 409)):
+        cur = MagicMock()
+        cur.fetchone.side_effect = [mov]
+
+        @contextmanager
+        def tx():
+            yield cur
+        with patch("routes.bancos.db.query", return_value=[{"id": "f1"}]), patch("routes.bancos.db.transaction", tx):
+            r = client.put("/api/bancos/c1/extrato/m9", headers=admin_headers,
+                           json={"acao": "lancar_fornecedor", "fornecedor_id": "f1"})
+        assert r.status_code == codigo
+
+
+def test_listar_extrato_sugere_fornecedor_pelo_beneficiario(client, admin_headers):
+    with patch("routes.bancos.db.query", side_effect=[[dict(MOV_BOLETO)], [{"id": "f1", "nome": "MXT"}]]), \
+         patch("routes.bancos.aliases.sugerir_fornecedor", return_value="f1"):
+        r = client.get("/api/bancos/c1/extrato", headers=admin_headers)
+    assert r.get_json()[0]["fornecedor_sugerido"] == {"id": "f1", "nome": "MXT"}
